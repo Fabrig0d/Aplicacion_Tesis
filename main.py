@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from datetime import datetime
-import traceback
+
 
 # Módulos locales
 import models, schemas, crud
