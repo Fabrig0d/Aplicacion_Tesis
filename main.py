@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, or_
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -261,17 +261,28 @@ def dashboard_stats(current_user: models.Usuario = Depends(require_role(["admini
         ).count()
         
         productos_activos = db.query(
-            models.Producto.nombre,
+            models.Producto.id_producto,
+            models.Producto.nombre.label("producto_nombre"),
+            models.Marca.nombre.label("marca_nombre"),
             func.count(models.MovimientoInventario.id_movimiento).label("movimientos")
-        ).join(models.MovimientoInventario).group_by(
-            models.Producto.id_producto
-        ).order_by(func.count(models.MovimientoInventario.id_movimiento).desc()).limit(5).all()
-        
+        ).join(
+            models.MovimientoInventario, models.MovimientoInventario.id_producto == models.Producto.id_producto
+        ).outerjoin(
+            models.Marca, models.Producto.id_marca == models.Marca.id_marca
+        ).group_by(
+            models.Producto.id_producto,
+            models.Producto.nombre,
+            models.Marca.nombre
+        ).order_by(
+            func.count(models.MovimientoInventario.id_movimiento).desc()
+        ).limit(5).all()
+
         productos_activos_list = [
             {
-                "nombre": f"{p.nombre} {p.marca or ''}".strip(),
-                "movimientos": p.movimientos
-            } for p in productos_activos
+            "nombre": f"{row.producto_nombre} {row.marca_nombre or ''}".strip(),
+            "movimientos": row.movimientos
+            }
+            for row in productos_activos
         ]
         
         return {
@@ -290,25 +301,38 @@ def movimientos_recientes(
 ):
     """Movimientos recientes con una sola sesión"""
     with get_db_session() as db:
-        movimientos = db.query(models.MovimientoInventario).join(
-            models.Producto
-        ).join(models.Usuario).order_by(
-            models.MovimientoInventario.fecha_movimiento.desc()
-        ).limit(limit).all()
-        
+        movimientos = (
+            db.query(models.MovimientoInventario)
+            .join(models.Producto, models.MovimientoInventario.id_producto == models.Producto.id_producto)
+            .outerjoin(models.Marca, models.Producto.id_marca == models.Marca.id_marca)
+            .join(models.Usuario, models.MovimientoInventario.id_usuario == models.Usuario.id_usuario)
+            .order_by(models.MovimientoInventario.fecha_movimiento.desc())
+            .limit(limit)
+            .all()
+        )
+
         result = []
         for m in movimientos:
+            marca_nombre = None
+            try:
+                marca_nombre = getattr(m.producto.marca, "nombre", None)
+            except Exception:
+                marca_nombre = None
+
             result.append({
                 "id": m.id_movimiento,
                 "tipo": m.tipo_movimiento.value if hasattr(m.tipo_movimiento, 'value') else str(m.tipo_movimiento),
-                "producto": f"{m.producto.nombre} {m.producto.marca or ''}".strip(),
+                "producto": f"{m.producto.nombre} {marca_nombre or ''}".strip(),
                 "cantidad": m.cantidad,
                 "usuario": f"{m.usuario.nombre} {m.usuario.apellido}",
                 "fecha": m.fecha_movimiento.isoformat(),
-                "descripcion": m.descripcion or ""
+                "descripcion": getattr(m, "descripcion", "") or ""
             })
-        
-        return result
+
+        return {
+            "movimientos": result,
+            "total": len(result)
+        }
 
 # ========== PRODUCTOS CON BÚSQUEDA ==========
 @app.get("/productos/search", tags=["Productos"])
@@ -316,41 +340,66 @@ def buscar_productos(
     q: str = Query("", min_length=0, max_length=100),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
+    current_user = Depends(require_role(["administrador", "operador"]))
 ):
-    """Búsqueda de productos con una sola sesión"""
+    """Búsqueda de productos con join a Marca y Categoría, paginada."""
     with get_db_session() as db:
-        query = db.query(models.Producto)
-        
+        # Base query con eager loading para evitar N+1
+        query = db.query(models.Producto).options(
+            joinedload(models.Producto.marca),      # producto.marca.nombre
+            joinedload(getattr(models.Producto, "categoria", None))  # si existe relación
+        )
+
+        # Filtro de búsqueda sobre nombre, modelo, descripción y marca.nombre
         if q.strip():
             search_term = f"%{q.strip()}%"
-            query = query.filter(
-                models.Producto.nombre.ilike(search_term) |
-                models.Producto.marca.ilike(search_term) |
-                models.Producto.modelo.ilike(search_term) |
-                models.Producto.descripcion.ilike(search_term)
-            )
-        
+            query = query.outerjoin(models.Marca, models.Producto.id_marca == models.Marca.id_marca)
+            filters = [
+                models.Producto.nombre.ilike(search_term),
+                getattr(models.Producto, "modelo", "").ilike(search_term) if hasattr(models.Producto, "modelo") else False,
+                getattr(models.Producto, "descripcion", "").ilike(search_term) if hasattr(models.Producto, "descripcion") else False,
+                models.Marca.nombre.ilike(search_term),
+            ]
+            # or_ ignora False; filtra por lo que exista realmente
+            query = query.filter(or_(*[f for f in filters if f is not False]))
+
+        # Total antes de paginar
         total = query.count()
+
+        # Orden opcional por nombre
+        query = query.order_by(models.Producto.nombre.asc())
+
+        # Paginación
         productos = query.offset(offset).limit(limit).all()
-        
+
+        # Armar respuesta
         result = []
         for p in productos:
+            # Marca segura
+            marca_nombre = getattr(getattr(p, "marca", None), "nombre", "") or ""
+            # Categoría segura si existe
+            categoria_nombre = ""
+            if hasattr(p, "categoria"):
+                categoria_rel = getattr(p, "categoria")
+                categoria_nombre = getattr(categoria_rel, "nombre", "") or ""
+
             estado_stock = "bajo" if p.stock_actual <= p.stock_minimo else "normal"
+
             result.append({
                 "id": p.id_producto,
                 "nombre": p.nombre,
-                "marca": p.marca or "",
-                "modelo": p.modelo or "",
-                "descripcion": p.descripcion or "",
+                "marca": marca_nombre,
+                "modelo": getattr(p, "modelo", "") or "",
+                "descripcion": getattr(p, "descripcion", "") or "",
                 "stock_actual": p.stock_actual,
                 "stock_minimo": p.stock_minimo,
                 "estado_stock": estado_stock,
-                "precio": float(p.precio) if p.precio else 0.0,
-                "categoria": p.categoria.nombre if hasattr(p, 'categoria') and p.categoria else "",
-                "fecha_actualizacion": p.fecha_actualizacion.isoformat() if hasattr(p, 'fecha_actualizacion') and p.fecha_actualizacion else None
+                "precio": float(getattr(p, "precio", 0.0) or 0.0),
+                "categoria": categoria_nombre,
+                "fecha_actualizacion": getattr(p, "fecha_actualizacion", None).isoformat()
+                    if getattr(p, "fecha_actualizacion", None) else None
             })
-        
+
         return {
             "productos": result,
             "total": total,

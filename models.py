@@ -83,14 +83,14 @@ class Producto(Base):
 # ---------- Movimiento de Inventario ----------
 class MovimientoInventario(Base):
     __tablename__ = "movimiento_inventario"
-
-    id_movimiento = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    id_producto = Column(Integer, ForeignKey("producto.id_producto"), nullable=False)
-    id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False)
-    tipo_movimiento = Column(Enum(TipoMovimientoEnum), nullable=False)
+    
+    id_movimiento = Column(Integer, primary_key=True, index=True)
+    id_producto = Column(Integer, ForeignKey("productos.id_producto"), nullable=False)
     cantidad = Column(Integer, nullable=False)
-    fecha_movimiento = Column(DateTime(timezone=True), server_default=func.now())
-    observaciones = Column((Text) , nullable=True) 
+    tipo_movimiento = Column(Enum(TipoMovimientoEnum), nullable=False)
+    id_usuario = Column(Integer, ForeignKey("usuario.id_usuario"), nullable=False)
+    fecha_movimiento = Column(DateTime, default=datetime.utcnow, nullable=False)
+    descripcion = Column(String(255), nullable=True)  # <-- NUEVO
 
     producto = relationship("Producto", back_populates="movimientos")
     usuario = relationship("Usuario", back_populates="movimientos")
