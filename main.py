@@ -152,7 +152,7 @@ def procesar_fallback(mensaje: str, user, db: Session):
 
             # Crear movimiento
             mov = models.MovimientoInventario(
-                tipo=models.TipoMovimientoEnum.entrada,
+                tipo_movimiento=models.TipoMovimientoEnum.entrada,
                 id_producto=prod_bd.id_producto,
                 cantidad=cantidad,
                 id_usuario=user.id_usuario,
@@ -186,7 +186,7 @@ def procesar_fallback(mensaje: str, user, db: Session):
                 }
 
             mov = models.MovimientoInventario(
-                tipo=models.TipoMovimientoEnum.salida,
+                tipo_movimiento=models.TipoMovimientoEnum.salida,
                 id_producto=prod_bd.id_producto,
                 cantidad=cantidad,
                 id_usuario=user.id_usuario,
@@ -290,7 +290,7 @@ def debug_test_insert(
         
         # Crear movimiento de prueba
         test_movimiento = models.MovimientoInventario(
-            tipo=models.TipoMovimientoEnum.entrada,
+            tipo_movimiento=models.TipoMovimientoEnum.entrada,
             id_producto=producto.id_producto,
             cantidad=1,
             id_usuario=current_user.id_usuario,
