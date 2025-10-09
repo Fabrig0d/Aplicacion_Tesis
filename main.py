@@ -127,7 +127,7 @@ def chatbot_endpoint(
 def procesar_fallback(mensaje: str, user, db: Session):
     """Fallback que ya recibe la sesión como parámetro"""
     msg = mensaje.lower()
-    
+
     # Detectar intención
     if any(w in msg for w in ["agrega", "añade"]):
         tipo = "entrada"
@@ -158,7 +158,7 @@ def procesar_fallback(mensaje: str, user, db: Session):
         prod_bd = db.query(models.Producto).filter(
             models.Producto.nombre.ilike(f"%{producto}%")
         ).first()
-        
+
         if not prod_bd:
             return {
                 'exito': False,
@@ -170,7 +170,8 @@ def procesar_fallback(mensaje: str, user, db: Session):
             id_producto=prod_bd.id_producto,
             cantidad=cantidad,
             id_usuario=user.id_usuario,
-            fecha_movimiento=datetime.now()
+            fecha_movimiento=datetime.now(),
+            observaciones=f"Entrada vía chatbot: {mensaje}"
         )
         db.add(mov)
         prod_bd.stock_actual += cantidad
@@ -187,10 +188,13 @@ def procesar_fallback(mensaje: str, user, db: Session):
         prod_bd = db.query(models.Producto).filter(
             models.Producto.nombre.ilike(f"%{producto}%")
         ).first()
-        
+
         if not prod_bd:
-            return {'exito': False, 'respuesta_chatbot': f"Producto {producto} no encontrado"}
-        
+            return {
+                'exito': False,
+                'respuesta_chatbot': f"Producto {producto} no encontrado"
+            }
+
         if prod_bd.stock_actual < cantidad:
             return {
                 'exito': False,
@@ -219,7 +223,7 @@ def procesar_fallback(mensaje: str, user, db: Session):
             prod_bd = db.query(models.Producto).filter(
                 models.Producto.nombre.ilike(f"%{producto}%")
             ).first()
-            
+
             if prod_bd:
                 return {
                     'exito': True,
@@ -227,7 +231,10 @@ def procesar_fallback(mensaje: str, user, db: Session):
                     'confianza': 0.9
                 }
             else:
-                return {'exito': False, 'respuesta_chatbot': f"Producto {producto} no encontrado"}
+                return {
+                    'exito': False,
+                    'respuesta_chatbot': f"Producto {producto} no encontrado"
+                }
         else:
             productos = db.query(models.Producto).limit(5).all()
             if productos:
@@ -238,9 +245,15 @@ def procesar_fallback(mensaje: str, user, db: Session):
                     'confianza': 0.9
                 }
             else:
-                return {'exito': True, 'respuesta_chatbot': "No hay productos registrados"}
+                return {
+                    'exito': True,
+                    'respuesta_chatbot': "No hay productos registrados"
+                }
 
-    return {'exito': False, 'respuesta_chatbot': "No pude procesar la solicitud"}
+    return {
+        'exito': False,
+        'respuesta_chatbot': "No pude procesar la solicitud"
+    }
 
 # ========== DASHBOARD DATA ==========
 @app.get("/dashboard/stats", tags=["Dashboard"])
@@ -248,18 +261,18 @@ def dashboard_stats(current_user: models.Usuario = Depends(require_role(["admini
     """Dashboard stats con una sola sesión"""
     with get_db_session() as db:
         total_productos = db.query(models.Producto).count()
-        
+
         productos_stock_bajo = db.query(models.Producto).filter(
             models.Producto.stock_actual <= models.Producto.stock_minimo
         ).count()
-        
+
         total_stock = db.query(func.sum(models.Producto.stock_actual)).scalar() or 0
-        
+
         desde_fecha = datetime.now() - timedelta(days=7)
         movimientos_recientes = db.query(models.MovimientoInventario).filter(
             models.MovimientoInventario.fecha_movimiento >= desde_fecha
         ).count()
-        
+
         productos_activos = db.query(
             models.Producto.id_producto,
             models.Producto.nombre.label("producto_nombre"),
@@ -279,12 +292,12 @@ def dashboard_stats(current_user: models.Usuario = Depends(require_role(["admini
 
         productos_activos_list = [
             {
-            "nombre": f"{row.producto_nombre} {row.marca_nombre or ''}".strip(),
-            "movimientos": row.movimientos
+                "nombre": f"{row.producto_nombre} {row.marca_nombre or ''}".strip(),
+                "movimientos": row.movimientos
             }
             for row in productos_activos
         ]
-        
+
         return {
             "total_productos": total_productos,
             "productos_stock_bajo": productos_stock_bajo,
@@ -293,6 +306,7 @@ def dashboard_stats(current_user: models.Usuario = Depends(require_role(["admini
             "productos_activos": productos_activos_list,
             "timestamp": datetime.now().isoformat()
         }
+    
 
 @app.get("/dashboard/movimientos-recientes", tags=["Dashboard"])
 def movimientos_recientes(
@@ -301,38 +315,29 @@ def movimientos_recientes(
 ):
     """Movimientos recientes con una sola sesión"""
     with get_db_session() as db:
-        movimientos = (
-            db.query(models.MovimientoInventario)
-            .join(models.Producto, models.MovimientoInventario.id_producto == models.Producto.id_producto)
-            .outerjoin(models.Marca, models.Producto.id_marca == models.Marca.id_marca)
-            .join(models.Usuario, models.MovimientoInventario.id_usuario == models.Usuario.id_usuario)
-            .order_by(models.MovimientoInventario.fecha_movimiento.desc())
-            .limit(limit)
-            .all()
-        )
+        movimientos = db.query(models.MovimientoInventario).join(
+            models.Producto, models.MovimientoInventario.id_producto == models.Producto.id_producto
+        ).outerjoin(
+            models.Marca, models.Producto.id_marca == models.Marca.id_marca
+        ).join(
+            models.Usuario, models.MovimientoInventario.id_usuario == models.Usuario.id_usuario
+        ).order_by(
+            models.MovimientoInventario.fecha_movimiento.desc()
+        ).limit(limit).all()
 
         result = []
         for m in movimientos:
-            marca_nombre = None
-            try:
-                marca_nombre = getattr(m.producto.marca, "nombre", None)
-            except Exception:
-                marca_nombre = None
-
+            marca_nombre = getattr(getattr(m.producto, "marca", None), "nombre", "") or ""
             result.append({
                 "id": m.id_movimiento,
                 "tipo": m.tipo_movimiento.value if hasattr(m.tipo_movimiento, 'value') else str(m.tipo_movimiento),
-                "producto": f"{m.producto.nombre} {marca_nombre or ''}".strip(),
+                "producto": f"{m.producto.nombre} {marca_nombre}".strip(),
                 "cantidad": m.cantidad,
                 "usuario": f"{m.usuario.nombre} {m.usuario.apellido}",
                 "fecha": m.fecha_movimiento.isoformat(),
-                "descripcion": getattr(m, "descripcion", "") or ""
+                "descripcion": getattr(m, "observaciones", "") or ""
             })
-
-        return {
-            "movimientos": result,
-            "total": len(result)
-        }
+        return result
 
 # ========== PRODUCTOS CON BÚSQUEDA ==========
 @app.get("/productos/search", tags=["Productos"])
@@ -342,31 +347,35 @@ def buscar_productos(
     offset: int = Query(0, ge=0),
     current_user = Depends(require_role(["administrador", "operador"]))
 ):
-    """Búsqueda de productos con join a Marca y Categoría, paginada."""
+    """
+    Búsqueda de productos con join a Marca (nombre_marca) y Categoría (nombre_categoria),
+    paginada y con eager loading para evitar N+1.
+    """
     with get_db_session() as db:
-        # Base query con eager loading para evitar N+1
+        # Base query con eager loading
         query = db.query(models.Producto).options(
-            joinedload(models.Producto.marca),      # producto.marca.nombre
-            joinedload(getattr(models.Producto, "categoria", None))  # si existe relación
+            joinedload(models.Producto.marca),      # producto.marca.nombre_marca
+            joinedload(models.Producto.categoria)   # producto.categoria.nombre_categoria
         )
 
-        # Filtro de búsqueda sobre nombre, modelo, descripción y marca.nombre
+        # Filtro de búsqueda
         if q.strip():
             search_term = f"%{q.strip()}%"
             query = query.outerjoin(models.Marca, models.Producto.id_marca == models.Marca.id_marca)
-            filters = [
+            query = query.outerjoin(models.Categoria, models.Producto.id_categoria == models.Categoria.id_categoria)
+
+            query = query.filter(or_(
                 models.Producto.nombre.ilike(search_term),
-                getattr(models.Producto, "modelo", "").ilike(search_term) if hasattr(models.Producto, "modelo") else False,
-                getattr(models.Producto, "descripcion", "").ilike(search_term) if hasattr(models.Producto, "descripcion") else False,
-                models.Marca.nombre.ilike(search_term),
-            ]
-            # or_ ignora False; filtra por lo que exista realmente
-            query = query.filter(or_(*[f for f in filters if f is not False]))
+                models.Producto.modelo.ilike(search_term),
+                models.Producto.descripcion.ilike(search_term),
+                models.Marca.nombre_marca.ilike(search_term),
+                models.Categoria.nombre_categoria.ilike(search_term),
+            ))
 
         # Total antes de paginar
         total = query.count()
 
-        # Orden opcional por nombre
+        # Orden consistente
         query = query.order_by(models.Producto.nombre.asc())
 
         # Paginación
@@ -375,29 +384,22 @@ def buscar_productos(
         # Armar respuesta
         result = []
         for p in productos:
-            # Marca segura
-            marca_nombre = getattr(getattr(p, "marca", None), "nombre", "") or ""
-            # Categoría segura si existe
-            categoria_nombre = ""
-            if hasattr(p, "categoria"):
-                categoria_rel = getattr(p, "categoria")
-                categoria_nombre = getattr(categoria_rel, "nombre", "") or ""
-
+            marca_nombre = getattr(getattr(p, "marca", None), "nombre_marca", "") or ""
+            categoria_nombre = getattr(getattr(p, "categoria", None), "nombre_categoria", "") or ""
             estado_stock = "bajo" if p.stock_actual <= p.stock_minimo else "normal"
 
             result.append({
                 "id": p.id_producto,
                 "nombre": p.nombre,
                 "marca": marca_nombre,
-                "modelo": getattr(p, "modelo", "") or "",
-                "descripcion": getattr(p, "descripcion", "") or "",
+                "modelo": p.modelo or "",
+                "descripcion": p.descripcion or "",
                 "stock_actual": p.stock_actual,
                 "stock_minimo": p.stock_minimo,
                 "estado_stock": estado_stock,
-                "precio": float(getattr(p, "precio", 0.0) or 0.0),
+                "precio": 0.0,  # no existe en el esquema, se mantiene por compatibilidad de frontend
                 "categoria": categoria_nombre,
-                "fecha_actualizacion": getattr(p, "fecha_actualizacion", None).isoformat()
-                    if getattr(p, "fecha_actualizacion", None) else None
+                "fecha_actualizacion": (p.fecha_registro.isoformat() if p.fecha_registro else None)
             })
 
         return {
