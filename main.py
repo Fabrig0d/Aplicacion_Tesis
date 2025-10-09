@@ -255,89 +255,6 @@ def procesar_fallback(mensaje: str, user, db: Session):
         'respuesta_chatbot': "No pude procesar la solicitud"
     }
 
-# ========== DASHBOARD DATA ==========
-@app.get("/dashboard/stats", tags=["Dashboard"])
-def dashboard_stats(current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
-    """Dashboard stats con una sola sesión"""
-    with get_db_session() as db:
-        total_productos = db.query(models.Producto).count()
-
-        productos_stock_bajo = db.query(models.Producto).filter(
-            models.Producto.stock_actual <= models.Producto.stock_minimo
-        ).count()
-
-        total_stock = db.query(func.sum(models.Producto.stock_actual)).scalar() or 0
-
-        desde_fecha = datetime.now() - timedelta(days=7)
-        movimientos_recientes = db.query(models.MovimientoInventario).filter(
-            models.MovimientoInventario.fecha_movimiento >= desde_fecha
-        ).count()
-
-        productos_activos = db.query(
-            models.Producto.id_producto,
-            models.Producto.nombre.label("producto_nombre"),
-            models.Marca.nombre_marca.label("nombre_marca"),
-            func.count(models.MovimientoInventario.id_movimiento).label("movimientos")
-        ).join(
-            models.MovimientoInventario, models.MovimientoInventario.id_producto == models.Producto.id_producto
-        ).outerjoin(
-            models.Marca, models.Producto.id_marca == models.Marca.id_marca
-        ).group_by(
-            models.Producto.id_producto,
-            models.Producto.nombre,
-            models.Marca.nombre_marca
-        ).order_by(
-            func.count(models.MovimientoInventario.id_movimiento).desc()
-        ).limit(5).all()
-
-        productos_activos_list = [
-            {
-                "nombre": f"{row.producto_nombre} {row.nombre_marca or ''}".strip(),
-                "movimientos": row.movimientos
-            }
-            for row in productos_activos
-        ]
-
-        return {
-            "total_productos": total_productos,
-            "productos_stock_bajo": productos_stock_bajo,
-            "total_stock": total_stock,
-            "movimientos_recientes": movimientos_recientes,
-            "productos_activos": productos_activos_list,
-            "timestamp": datetime.now().isoformat()
-        }
-    
-
-@app.get("/dashboard/movimientos-recientes", tags=["Dashboard"])
-def movimientos_recientes(
-    limit: int = Query(10, ge=1, le=50),
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
-):
-    """Movimientos recientes con una sola sesión"""
-    with get_db_session() as db:
-        movimientos = db.query(models.MovimientoInventario).join(
-            models.Producto, models.MovimientoInventario.id_producto == models.Producto.id_producto
-        ).outerjoin(
-            models.Marca, models.Producto.id_marca == models.Marca.id_marca
-        ).join(
-            models.Usuario, models.MovimientoInventario.id_usuario == models.Usuario.id_usuario
-        ).order_by(
-            models.MovimientoInventario.fecha_movimiento.desc()
-        ).limit(limit).all()
-
-        result = []
-        for m in movimientos:
-            marca_nombre = getattr(getattr(m.producto, "marca", None), "nombre", "") or ""
-            result.append({
-                "id": m.id_movimiento,
-                "tipo": m.tipo_movimiento.value if hasattr(m.tipo_movimiento, 'value') else str(m.tipo_movimiento),
-                "producto": f"{m.producto.nombre} {marca_nombre}".strip(),
-                "cantidad": m.cantidad,
-                "usuario": f"{m.usuario.nombre} {m.usuario.apellido}",
-                "fecha": m.fecha_movimiento.isoformat(),
-                "descripcion": getattr(m, "observaciones", "") or ""
-            })
-        return result
 
 # ========== PRODUCTOS CON BÚSQUEDA ==========
 @app.get("/productos/search", tags=["Productos"])
@@ -538,6 +455,96 @@ def crear_admin():
             
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+        
+@app.get("/dashboard/summary", tags=["Dashboard"])
+def dashboard_summary(
+    limit_movimientos: int = Query(8, ge=1, le=50),
+    current_user = Depends(require_role(["administrador", "operador"]))
+):
+    """
+    Devuelve todas las tarjetas y listas del dashboard en una sola respuesta,
+    usando UNA sola sesión de BD para no superar max_user_connections.
+    """
+    with get_db_session() as db:
+        # ========== Stats ==========
+        total_productos = db.query(models.Producto).count()
+
+        productos_stock_bajo = db.query(models.Producto).filter(
+            models.Producto.stock_actual <= models.Producto.stock_minimo
+        ).count()
+
+        total_stock = db.query(func.sum(models.Producto.stock_actual)).scalar() or 0
+
+        desde_fecha = datetime.now() - timedelta(days=7)
+        movimientos_recientes_count = db.query(models.MovimientoInventario).filter(
+            models.MovimientoInventario.fecha_movimiento >= desde_fecha
+        ).count()
+
+        # ========== Productos más activos ==========
+        productos_activos_rows = db.query(
+            models.Producto.id_producto,
+            models.Producto.nombre.label("producto_nombre"),
+            models.Marca.nombre_marca.label("marca_nombre"),
+            func.count(models.MovimientoInventario.id_movimiento).label("movimientos")
+        ).join(
+            models.MovimientoInventario, models.MovimientoInventario.id_producto == models.Producto.id_producto
+        ).outerjoin(
+            models.Marca, models.Producto.id_marca == models.Marca.id_marca
+        ).group_by(
+            models.Producto.id_producto,
+            models.Producto.nombre,
+            models.Marca.nombre_marca
+        ).order_by(
+            func.count(models.MovimientoInventario.id_movimiento).desc()
+        ).limit(5).all()
+
+        productos_activos = [
+            {
+                "nombre": f"{row.producto_nombre} {row.marca_nombre or ''}".strip(),
+                "movimientos": row.movimientos
+            }
+            for row in productos_activos_rows
+        ]
+
+        # ========== Movimientos recientes ==========
+        movimientos = db.query(models.MovimientoInventario).join(
+            models.Producto, models.MovimientoInventario.id_producto == models.Producto.id_producto
+        ).outerjoin(
+            models.Marca, models.Producto.id_marca == models.Marca.id_marca
+        ).join(
+            models.Usuario, models.MovimientoInventario.id_usuario == models.Usuario.id_usuario
+        ).options(
+            joinedload(models.MovimientoInventario.producto).joinedload(models.Producto.marca),
+            joinedload(models.MovimientoInventario.usuario),
+        ).order_by(
+            models.MovimientoInventario.fecha_movimiento.desc()
+        ).limit(limit_movimientos).all()
+
+        movimientos_list = []
+        for m in movimientos:
+            marca_nombre = getattr(getattr(m.producto, "marca", None), "nombre_marca", "") or ""
+            movimientos_list.append({
+                "id": m.id_movimiento,
+                "tipo": m.tipo_movimiento.value if hasattr(m.tipo_movimiento, 'value') else str(m.tipo_movimiento),
+                "producto": f"{m.producto.nombre} {marca_nombre}".strip(),
+                "cantidad": m.cantidad,
+                "usuario": f"{m.usuario.nombre} {m.usuario.apellido}",
+                "fecha": m.fecha_movimiento.isoformat(),
+                "descripcion": getattr(m, "observaciones", "") or ""
+            })
+
+        # ========== Respuesta única ==========
+        return {
+            "stats": {
+                "total_productos": total_productos,
+                "productos_stock_bajo": productos_stock_bajo,
+                "total_stock": total_stock,
+                "movimientos_recientes": movimientos_recientes_count,
+                "timestamp": datetime.now().isoformat()
+            },
+            "productos_activos": productos_activos,
+            "movimientos": movimientos_list
+        }
 
 if __name__ == "__main__":
     import uvicorn
