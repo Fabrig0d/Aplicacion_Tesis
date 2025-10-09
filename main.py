@@ -84,7 +84,7 @@ def chatbot_endpoint(
     try:
         # Intentar PLN completo
         try:
-            from chatbot import procesar_mensaje_chatbot
+            from pln_hf import procesar_mensaje_chatbot
             resultado = procesar_mensaje_chatbot(request.mensaje, current_user.id_usuario, db)
         except ImportError:
             # Fallback sin PLN
