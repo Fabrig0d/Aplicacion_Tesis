@@ -90,7 +90,7 @@ class MovimientoInventario(Base):
     tipo_movimiento = Column(Enum(TipoMovimientoEnum), nullable=False)
     cantidad = Column(Integer, nullable=False)
     fecha_movimiento = Column(DateTime(timezone=True), server_default=func.now())
-    observaciones = Column(Text)
+    observaciones = Column((Text) , nullable=True) 
 
     producto = relationship("Producto", back_populates="movimientos")
     usuario = relationship("Usuario", back_populates="movimientos")
