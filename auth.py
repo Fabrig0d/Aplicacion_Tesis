@@ -1,52 +1,55 @@
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
-from database import SessionLocal
+from database import get_db_session
 import models
-from jose import jwt, JWTError
 
-# Configuración de JWT
-SECRET_KEY = "F@br1zi0xd"  # 🔒 cámbiala por algo más seguro
+# ================== CONFIG JWT ==================
+# Cambiar en producción: usa variable de entorno
+SECRET_KEY = "F@br1zi0xd"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-# Seguridad para contraseñas
+# ================== SECURITY ==================
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-# Funciones auxiliares
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def verify_password(plain_password, hashed_password):
+# ================== HELPERS ==================
+def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password):
+def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 def authenticate_user(db: Session, correo: str, password: str):
+    """
+    Autentica por correo y password.
+    Devuelve el usuario o False si no coincide.
+    """
     user = db.query(models.Usuario).filter(models.Usuario.correo == correo).first()
     if not user or not verify_password(password, user.password_hash):
         return False
     return user
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """
+    Crea un token JWT con expiración.
+    """
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-
-async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+# ================== CURRENT USER ==================
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """
+    Obtiene el usuario actual a partir del token.
+    Usa una sesión de BD por contexto y la cierra correctamente.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Token inválido o expirado",
@@ -59,12 +62,16 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    user = db.query(models.Usuario).filter(models.Usuario.correo == correo).first()
-    if user is None:
-        raise credentials_exception
-    return user
 
-def require_role(required_roles: list[str]):
+    # Consulta del usuario con context manager para NO dejar sesiones abiertas
+    with get_db_session() as db:
+        user = db.query(models.Usuario).filter(models.Usuario.correo == correo).first()
+        if user is None:
+            raise credentials_exception
+        return user
+
+# ================== ROLE CHECKER ==================
+def require_role(required_roles: List[str]):
     """
     Verifica que el usuario actual tenga alguno de los roles requeridos.
     - Soporta roles como Enum o string.
@@ -85,9 +92,11 @@ def require_role(required_roles: list[str]):
     )
 
     def to_role_str(role_obj) -> str:
-        # Acepta Enum ('RolEnum.administrador'), strings y otros tipos
+        """
+        Acepta Enum ('RolEnum.administrador'), strings y otros tipos.
+        Si es Enum usa .value, de lo contrario str(role_obj).
+        """
         try:
-            # Si es Enum, usa .value si existe
             value = getattr(role_obj, "value", role_obj)
             return str(value).lower().strip()
         except Exception:
@@ -97,9 +106,6 @@ def require_role(required_roles: list[str]):
         raw_role = current_user.rol
         user_role_str = to_role_str(raw_role)
         normalized_user_role = alias_map.get(user_role_str, user_role_str)
-
-        # Debug opcional:
-        # print(f"[AUTH] raw='{raw_role}' parsed='{user_role_str}' norm='{normalized_user_role}' req={normalized_required}")
 
         if normalized_user_role not in normalized_required:
             raise HTTPException(

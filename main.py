@@ -9,18 +9,9 @@ import logging
 from datetime import datetime, timedelta
 import os
 from fastapi.responses import JSONResponse
-
-# Módulos locales
 import models, schemas, crud
 from auth import authenticate_user, create_access_token, require_role
-from database import SessionLocal, engine, Base
-
-# Crear tablas
-try:
-    Base.metadata.create_all(bind=engine)
-    print("✅ Tablas creadas")
-except Exception as e:
-    print(f"⚠️ Error tablas: {e}")
+from database import SessionLocal, engine, Base, get_db_session, get_db
 
 # App
 app = FastAPI(title="API Inventario PLN", version="2.0.0")
@@ -37,14 +28,6 @@ app.add_middleware(
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# DB
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 # Schemas
 class ChatbotRequest(BaseModel):
@@ -64,40 +47,54 @@ def root():
 
 # ========== LOGIN ==========
 @app.post("/login")
-def login(
-    form_data: OAuth2PasswordRequestForm = Depends(), 
-    db: Session = Depends(get_db)
-):
-    user = authenticate_user(db, form_data.username, form_data.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    
-    token = create_access_token(data={"sub": user.correo})
-    return {"access_token": token, "token_type": "bearer"}
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login usando context manager para sesión única"""
+    with get_db_session() as db:
+        user = authenticate_user(db, form_data.username, form_data.password)
+        if not user:
+            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+        
+        token = create_access_token(data={"sub": user.correo})
+        return {"access_token": token, "token_type": "bearer"}
+
+# ========== USUARIOS ==========
+@app.get("/usuarios/me")
+def read_users_me(current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
+    """No necesita DB adicional ya que current_user viene de auth"""
+    return {
+        "id": current_user.id_usuario,
+        "correo": current_user.correo,
+        "nombre": current_user.nombre,
+        "apellido": current_user.apellido,
+        "rol": getattr(current_user.rol, "value", str(current_user.rol)),
+        "telefono": getattr(current_user, 'telefono', None),
+        "fecha_registro": getattr(current_user, 'fecha_registro', datetime.now()).isoformat() if hasattr(current_user, 'fecha_registro') else None,
+    }
 
 # ========== CHATBOT PRINCIPAL ==========
 @app.post("/chatbot/inventario", response_model=ChatbotResponse)
 def chatbot_endpoint(
     request: ChatbotRequest,
-    db: Session = Depends(get_db),
     current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
 ):
+    """Chatbot con sesión única y context manager"""
     try:
-        # Intentar PLN completo
-        try:
-            from pln_hf import procesar_mensaje_chatbot
-            resultado = procesar_mensaje_chatbot(request.mensaje, current_user.id_usuario, db)
-        except ImportError:
-            # Fallback sin PLN
-            resultado = procesar_fallback(request.mensaje, current_user, db)
+        with get_db_session() as db:
+            # Intentar PLN completo
+            try:
+                from pln_hf import procesar_mensaje_chatbot
+                resultado = procesar_mensaje_chatbot(request.mensaje, current_user.id_usuario, db)
+            except ImportError:
+                # Fallback sin PLN
+                resultado = procesar_fallback(request.mensaje, current_user, db)
 
-        return ChatbotResponse(
-            exito=resultado.get('exito', False),
-            respuesta_chatbot=resultado.get('respuesta_chatbot', 'Sin respuesta'),
-            confianza=resultado.get('confianza', 0.0),
-            orden_procesada=resultado.get('orden_procesada'),
-            timestamp=datetime.now().isoformat()
-        )
+            return ChatbotResponse(
+                exito=resultado.get('exito', False),
+                respuesta_chatbot=resultado.get('respuesta_chatbot', 'Sin respuesta'),
+                confianza=resultado.get('confianza', 0.0),
+                orden_procesada=resultado.get('orden_procesada'),
+                timestamp=datetime.now().isoformat()
+            )
 
     except Exception as e:
         logger.error(f"Error chatbot: {e}")
@@ -108,7 +105,7 @@ def chatbot_endpoint(
         )
 
 def procesar_fallback(mensaje: str, user, db: Session):
-    """Procesamiento básico sin PLN pero con BD real"""
+    """Fallback que ya recibe la sesión como parámetro"""
     msg = mensaje.lower()
     
     # Detectar intención
@@ -137,276 +134,112 @@ def procesar_fallback(mensaje: str, user, db: Session):
             producto = p
             break
 
-    try:
-        if tipo == "entrada" and producto:
-            # Buscar producto en BD
-            prod_bd = db.query(models.Producto).filter(
-                models.Producto.nombre.ilike(f"%{producto}%")
-            ).first()
-            
-            if not prod_bd:
-                return {
-                    'exito': False,
-                    'respuesta_chatbot': f"Producto {producto} no encontrado"
-                }
-
-            # Crear movimiento
-            mov = models.MovimientoInventario(
-                tipo_movimiento=models.TipoMovimientoEnum.entrada,
-                id_producto=prod_bd.id_producto,
-                cantidad=cantidad,
-                id_usuario=user.id_usuario,
-                fecha_movimiento=datetime.now()
-            )
-            db.add(mov)
-            
-            # Actualizar stock
-            prod_bd.stock_actual += cantidad
-            db.commit()
-
+    if tipo == "entrada" and producto:
+        prod_bd = db.query(models.Producto).filter(
+            models.Producto.nombre.ilike(f"%{producto}%")
+        ).first()
+        
+        if not prod_bd:
             return {
-                'exito': True,
-                'respuesta_chatbot': f"✅ Agregados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
-                'confianza': 0.8,
-                'orden_procesada': {'tipo': 'entrada', 'producto': prod_bd.nombre, 'cantidad': cantidad}
+                'exito': False,
+                'respuesta_chatbot': f"Producto {producto} no encontrado"
             }
 
-        elif tipo == "salida" and producto:
-            prod_bd = db.query(models.Producto).filter(
-                models.Producto.nombre.ilike(f"%{producto}%")
-            ).first()
-            
-            if not prod_bd:
-                return {'exito': False, 'respuesta_chatbot': f"Producto {producto} no encontrado"}
-            
-            if prod_bd.stock_actual < cantidad:
-                return {
-                    'exito': False,
-                    'respuesta_chatbot': f"Stock insuficiente. Disponible: {prod_bd.stock_actual}"
-                }
-
-            mov = models.MovimientoInventario(
-                tipo_movimiento=models.TipoMovimientoEnum.salida,
-                id_producto=prod_bd.id_producto,
-                cantidad=cantidad,
-                id_usuario=user.id_usuario,
-                fecha_movimiento=datetime.now()
-            )
-            db.add(mov)
-            
-            prod_bd.stock_actual -= cantidad
-            db.commit()
-
-            return {
-                'exito': True,
-                'respuesta_chatbot': f"✅ Retirados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
-                'confianza': 0.8,
-                'orden_procesada': {'tipo': 'salida', 'producto': prod_bd.nombre, 'cantidad': cantidad}
-            }
-
-        elif tipo == "consulta":
-            if producto:
-                prod_bd = db.query(models.Producto).filter(
-                    models.Producto.nombre.ilike(f"%{producto}%")
-                ).first()
-                
-                if prod_bd:
-                    return {
-                        'exito': True,
-                        'respuesta_chatbot': f"📊 {prod_bd.nombre}: {prod_bd.stock_actual} unidades",
-                        'confianza': 0.9
-                    }
-                else:
-                    return {'exito': False, 'respuesta_chatbot': f"Producto {producto} no encontrado"}
-            else:
-                # Consulta general
-                productos = db.query(models.Producto).limit(5).all()
-                if productos:
-                    lista = [f"• {p.nombre}: {p.stock_actual}" for p in productos]
-                    return {
-                        'exito': True,
-                        'respuesta_chatbot': "📊 Stock:\n" + "\n".join(lista),
-                        'confianza': 0.9
-                    }
-                else:
-                    return {'exito': True, 'respuesta_chatbot': "No hay productos registrados"}
-
-        return {'exito': False, 'respuesta_chatbot': "No pude procesar la solicitud"}
-
-    except Exception as e:
-        db.rollback()
-        return {'exito': False, 'respuesta_chatbot': f"Error: {str(e)[:50]}"}
-    
-# ========== ENDPOINTS DE DEBUG BD ==========
-@app.get("/debug/database", tags=["Debug"])
-def debug_database():
-    """Información detallada de la conexión a BD"""
-    try:
-        from database import get_db_info, test_connection
-        
-        # Probar conexión
-        connection_ok = test_connection()
-        
-        # Obtener info
-        db_info = get_db_info()
-        
-        # Variables de entorno (sin mostrar credenciales completas)
-        database_url = os.getenv("DATABASE_URL", "No configurada")
-        url_preview = database_url[:30] + "..." if len(database_url) > 30 else database_url
-        
-        return {
-            "connection_status": "✅ Conectado" if connection_ok else "❌ Error",
-            "database_info": db_info,
-            "environment": {
-                "DATABASE_URL_configured": database_url != "No configurada",
-                "DATABASE_URL_preview": url_preview,
-                "render_external_hostname": os.getenv("RENDER_EXTERNAL_HOSTNAME", "No configurado"),
-                "render_service_name": os.getenv("RENDER_SERVICE_NAME", "No configurado")
-            },
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error en debug database: {e}")
-        return {
-            "connection_status": "❌ Error crítico",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
-
-@app.get("/debug/test-insert", tags=["Debug"])
-def debug_test_insert(
-    db: Session = Depends(get_db),
-    current_user: models.Usuario = Depends(require_role(["administrador"]))
-):
-    """Prueba insertar un movimiento de prueba para verificar BD"""
-    try:
-        # Verificar que exista al menos un producto
-        producto = db.query(models.Producto).first()
-        if not producto:
-            return {
-                "error": "No hay productos en la BD para hacer la prueba",
-                "suggestion": "Crea al menos un producto primero"
-            }
-        
-        # Crear movimiento de prueba
-        test_movimiento = models.MovimientoInventario(
+        mov = models.MovimientoInventario(
             tipo_movimiento=models.TipoMovimientoEnum.entrada,
-            id_producto=producto.id_producto,
-            cantidad=1,
-            id_usuario=current_user.id_usuario,
-            descripcion="🧪 Prueba de conexión BD desde API",
+            id_producto=prod_bd.id_producto,
+            cantidad=cantidad,
+            id_usuario=user.id_usuario,
             fecha_movimiento=datetime.now()
         )
-        
-        db.add(test_movimiento)
-        db.commit()
-        db.refresh(test_movimiento)
-        
-        # Actualizar stock
-        producto.stock_actual += 1
-        db.commit()
-        
+        db.add(mov)
+        prod_bd.stock_actual += cantidad
+        # No hacemos commit aquí, el context manager se encarga
+
         return {
-            "success": "✅ Inserción exitosa",
-            "movimiento_id": test_movimiento.id_movimiento,
-            "producto_actualizado": {
-                "id": producto.id_producto,
-                "nombre": producto.nombre,
-                "stock_actual": producto.stock_actual
-            },
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Error en test insert: {e}")
-        return {
-            "error": f"❌ Fallo inserción: {str(e)}",
-            "timestamp": datetime.now().isoformat()
+            'exito': True,
+            'respuesta_chatbot': f"✅ Agregados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
+            'confianza': 0.8,
+            'orden_procesada': {'tipo': 'entrada', 'producto': prod_bd.nombre, 'cantidad': cantidad}
         }
 
-@app.get("/debug/productos-count", tags=["Debug"])
-def debug_productos_count(db: Session = Depends(get_db)):
-    """Cuenta productos en la BD para verificar datos"""
-    try:
-        total_productos = db.query(models.Producto).count()
-        productos_con_stock = db.query(models.Producto).filter(models.Producto.stock_actual > 0).count()
+    elif tipo == "salida" and producto:
+        prod_bd = db.query(models.Producto).filter(
+            models.Producto.nombre.ilike(f"%{producto}%")
+        ).first()
         
-        # Obtener algunos productos de ejemplo
-        productos_ejemplo = db.query(models.Producto).limit(3).all()
-        ejemplo_lista = []
-        for p in productos_ejemplo:
-            ejemplo_lista.append({
-                "id": p.id_producto,
-                "nombre": p.nombre,
-                "marca": p.marca,
-                "stock": p.stock_actual
-            })
+        if not prod_bd:
+            return {'exito': False, 'respuesta_chatbot': f"Producto {producto} no encontrado"}
         
+        if prod_bd.stock_actual < cantidad:
+            return {
+                'exito': False,
+                'respuesta_chatbot': f"Stock insuficiente. Disponible: {prod_bd.stock_actual}"
+            }
+
+        mov = models.MovimientoInventario(
+            tipo_movimiento=models.TipoMovimientoEnum.salida,
+            id_producto=prod_bd.id_producto,
+            cantidad=cantidad,
+            id_usuario=user.id_usuario,
+            fecha_movimiento=datetime.now()
+        )
+        db.add(mov)
+        prod_bd.stock_actual -= cantidad
+
         return {
-            "total_productos": total_productos,
-            "productos_con_stock": productos_con_stock,
-            "productos_ejemplo": ejemplo_lista,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Error en productos count: {e}")
-        return {
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            'exito': True,
+            'respuesta_chatbot': f"✅ Retirados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
+            'confianza': 0.8,
+            'orden_procesada': {'tipo': 'salida', 'producto': prod_bd.nombre, 'cantidad': cantidad}
         }
 
-# ========== PRODUCTOS ==========
-@app.get("/productos/")
-def listar_productos(
-    db: Session = Depends(get_db),
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
-):
-    return crud.get_productos(db)
+    elif tipo == "consulta":
+        if producto:
+            prod_bd = db.query(models.Producto).filter(
+                models.Producto.nombre.ilike(f"%{producto}%")
+            ).first()
+            
+            if prod_bd:
+                return {
+                    'exito': True,
+                    'respuesta_chatbot': f"📊 {prod_bd.nombre}: {prod_bd.stock_actual} unidades",
+                    'confianza': 0.9
+                }
+            else:
+                return {'exito': False, 'respuesta_chatbot': f"Producto {producto} no encontrado"}
+        else:
+            productos = db.query(models.Producto).limit(5).all()
+            if productos:
+                lista = [f"• {p.nombre}: {p.stock_actual}" for p in productos]
+                return {
+                    'exito': True,
+                    'respuesta_chatbot': "📊 Stock:\n" + "\n".join(lista),
+                    'confianza': 0.9
+                }
+            else:
+                return {'exito': True, 'respuesta_chatbot': "No hay productos registrados"}
 
-@app.post("/productos/")
-def crear_producto(
-    producto: schemas.ProductoCreate,
-    db: Session = Depends(get_db),
-    current_user: models.Usuario = Depends(require_role(["administrador"]))
-):
-    return crud.create_producto(db, producto)
-
-# ========== MOVIMIENTOS ==========
-@app.get("/movimientos/")
-def listar_movimientos(
-    db: Session = Depends(get_db),
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
-):
-    return crud.get_movimientos(db, skip=0, limit=50)
+    return {'exito': False, 'respuesta_chatbot': "No pude procesar la solicitud"}
 
 # ========== DASHBOARD DATA ==========
 @app.get("/dashboard/stats", tags=["Dashboard"])
-def dashboard_stats(
-    db: Session = Depends(get_db),
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
-):
-    """Estadísticas reales del dashboard"""
-    try:
-        # Total productos
+def dashboard_stats(current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
+    """Dashboard stats con una sola sesión"""
+    with get_db_session() as db:
         total_productos = db.query(models.Producto).count()
         
-        # Productos con stock bajo (menor o igual al mínimo)
         productos_stock_bajo = db.query(models.Producto).filter(
             models.Producto.stock_actual <= models.Producto.stock_minimo
         ).count()
         
-        # Total stock (suma de todos los productos)
         total_stock = db.query(func.sum(models.Producto.stock_actual)).scalar() or 0
         
-        # Movimientos recientes (últimos 7 días)
         desde_fecha = datetime.now() - timedelta(days=7)
         movimientos_recientes = db.query(models.MovimientoInventario).filter(
             models.MovimientoInventario.fecha_movimiento >= desde_fecha
         ).count()
         
-        # Productos más activos (con más movimientos)
         productos_activos = db.query(
             models.Producto.nombre,
             models.Producto.marca,
@@ -415,7 +248,6 @@ def dashboard_stats(
             models.Producto.id_producto
         ).order_by(func.count(models.MovimientoInventario.id_movimiento).desc()).limit(5).all()
         
-        # Formatear productos activos
         productos_activos_list = [
             {
                 "nombre": f"{p.nombre} {p.marca or ''}".strip(),
@@ -431,19 +263,14 @@ def dashboard_stats(
             "productos_activos": productos_activos_list,
             "timestamp": datetime.now().isoformat()
         }
-        
-    except Exception as e:
-        logger.error(f"Error dashboard stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/dashboard/movimientos-recientes", tags=["Dashboard"])
 def movimientos_recientes(
     limit: int = Query(10, ge=1, le=50),
-    db: Session = Depends(get_db),
     current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
 ):
-    """Movimientos recientes con detalles de producto y usuario"""
-    try:
+    """Movimientos recientes con una sola sesión"""
+    with get_db_session() as db:
         movimientos = db.query(models.MovimientoInventario).join(
             models.Producto
         ).join(models.Usuario).order_by(
@@ -463,25 +290,19 @@ def movimientos_recientes(
             })
         
         return result
-        
-    except Exception as e:
-        logger.error(f"Error movimientos recientes: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    
+
 # ========== PRODUCTOS CON BÚSQUEDA ==========
 @app.get("/productos/search", tags=["Productos"])
 def buscar_productos(
-    q: str = Query("", min_length=0, max_length=100, description="Término de búsqueda"),
+    q: str = Query("", min_length=0, max_length=100),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
     current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
 ):
-    """Búsqueda de productos con paginación"""
-    try:
+    """Búsqueda de productos con una sola sesión"""
+    with get_db_session() as db:
         query = db.query(models.Producto)
         
-        # Aplicar filtro de búsqueda si se proporciona
         if q.strip():
             search_term = f"%{q.strip()}%"
             query = query.filter(
@@ -491,13 +312,9 @@ def buscar_productos(
                 models.Producto.descripcion.ilike(search_term)
             )
         
-        # Total de resultados (para paginación)
         total = query.count()
-        
-        # Aplicar paginación
         productos = query.offset(offset).limit(limit).all()
         
-        # Formatear respuesta
         result = []
         for p in productos:
             estado_stock = "bajo" if p.stock_actual <= p.stock_minimo else "normal"
@@ -522,27 +339,40 @@ def buscar_productos(
             "per_page": limit,
             "query": q
         }
-        
-    except Exception as e:
-        logger.error(f"Error búsqueda productos: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+# ========== PRODUCTOS LEGACY ==========
+@app.get("/productos/")
+def listar_productos(current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
+    with get_db_session() as db:
+        return crud.get_productos(db)
+
+@app.post("/productos/")
+def crear_producto(
+    producto: schemas.ProductoCreate,
+    current_user: models.Usuario = Depends(require_role(["administrador"]))
+):
+    with get_db_session() as db:
+        return crud.create_producto(db, producto)
+
+@app.get("/movimientos/")
+def listar_movimientos(current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
+    with get_db_session() as db:
+        return crud.get_movimientos(db, skip=0, limit=50)
 
 # ========== HEALTH ==========
 @app.get("/health", tags=["Health"])
 def health_check():
-    """Health check mejorado con detalles de BD"""
+    """Health check con información de pool"""
     try:
         from database import test_connection, get_db_info
         
-        # Test conexión
         db_connected = test_connection()
         db_info = get_db_info() if db_connected else {"status": "disconnected"}
         
-        # Test básico de query
+        # Test query con context manager
         try:
-            db = SessionLocal()
-            productos_count = db.query(models.Producto).count()
-            db.close()
+            with get_db_session() as db:
+                productos_count = db.query(models.Producto).count()
             query_test = "✅ OK"
         except Exception as e:
             productos_count = "error"
@@ -559,13 +389,15 @@ def health_check():
                     "connection": "✅ connected" if db_connected else "❌ disconnected",
                     "info": db_info,
                     "query_test": query_test,
-                    "productos_count": productos_count
+                    "productos_count": productos_count,
+                    "pool_info": {
+                        "size": engine.pool.size(),
+                        "checked_out": engine.pool.checkedout(),
+                        "overflow": engine.pool.overflow(),
+                        "checked_in": engine.pool.checkedin()
+                    }
                 },
                 "api": "✅ running"
-            },
-            "environment": {
-                "service": os.getenv("RENDER_SERVICE_NAME", "unknown"),
-                "region": os.getenv("RENDER_EXTERNAL_HOSTNAME", "unknown")
             }
         }
         
@@ -579,50 +411,63 @@ def health_check():
                 "error": str(e)
             }
         )
-    
-@app.get("/usuarios/me")
-def read_users_me(
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
-):
-    return {
-        "id": current_user.id_usuario,
-        "correo": current_user.correo,
-        "nombre": current_user.nombre,
-        "apellido": current_user.apellido,
-        "rol": getattr(current_user.rol, "value", str(current_user.rol)),
-        "telefono": getattr(current_user, 'telefono', None),
-        "fecha_registro": getattr(current_user, 'fecha_registro', datetime.now()).isoformat() if hasattr(current_user, 'fecha_registro') else None,
-    }
+
+# ========== DEBUG ENDPOINTS (usar con precaución) ==========
+@app.get("/debug/database", tags=["Debug"])
+def debug_database():
+    try:
+        from database import get_db_info, test_connection
+        
+        connection_ok = test_connection()
+        db_info = get_db_info()
+        
+        database_url = os.getenv("DATABASE_URL", "No configurada")
+        url_preview = database_url[:30] + "..." if len(database_url) > 30 else database_url
+        
+        return {
+            "connection_status": "✅ Conectado" if connection_ok else "❌ Error",
+            "database_info": db_info,
+            "environment": {
+                "DATABASE_URL_configured": database_url != "No configurada",
+                "DATABASE_URL_preview": url_preview,
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "connection_status": "❌ Error crítico",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
 # ========== ADMIN DEMO ==========
 @app.post("/crear-admin-demo")
-def crear_admin(db: Session = Depends(get_db)):
-    try:
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def crear_admin():
+    with get_db_session() as db:
+        try:
+            from passlib.context import CryptContext
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-        existing = db.query(models.Usuario).filter(
-            models.Usuario.correo == "admin@demo.com"
-        ).first()
-        
-        if existing:
-            return {"message": "Usuario existe", "correo": "admin@demo.com"}
+            existing = db.query(models.Usuario).filter(
+                models.Usuario.correo == "admin@demo.com"
+            ).first()
+            
+            if existing:
+                return {"message": "Usuario existe", "correo": "admin@demo.com"}
 
-        admin = models.Usuario(
-            nombre="Admin",
-            apellido="Demo", 
-            correo="admin@demo.com",
-            rol=models.RolEnum.administrador if hasattr(models, 'RolEnum') else "administrador",
-            password_hash=pwd_context.hash("demo123")
-        )
+            admin = models.Usuario(
+                nombre="Admin",
+                apellido="Demo", 
+                correo="admin@demo.com",
+                rol=models.RolEnum.administrador if hasattr(models, 'RolEnum') else "administrador",
+                password_hash=pwd_context.hash("demo123")
+            )
 
-        db.add(admin)
-        db.commit()
-
-        return {"message": "Usuario creado", "correo": "admin@demo.com", "password": "demo123"}
-        
-    except Exception as e:
-        db.rollback()
-        return {"error": str(e)}
+            db.add(admin)
+            return {"message": "Usuario creado", "correo": "admin@demo.com", "password": "demo123"}
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
