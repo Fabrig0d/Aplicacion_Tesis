@@ -1,20 +1,19 @@
+# Usar Python 3.11
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
+# Crear y usar directorio de la app
 WORKDIR /app
 
+# Copiar requirements y luego instalar
 COPY requirements.txt .
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install -r requirements.txt
 
-# Instalar solo lo esencial
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Instalar PyTorch CPU-only si necesitas PLN
-# RUN pip install --no-cache-dir torch==2.1.1+cpu --extra-index-url https://download.pytorch.org/whl/cpu
-
+# Copiar todo el proyecto
 COPY . .
 
+# Exponer puerto 8000 (el que usa uvicorn)
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$PORT"]
+
+# Comando para iniciar FastAPI
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
