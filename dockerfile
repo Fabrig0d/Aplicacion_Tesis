@@ -1,5 +1,5 @@
 # Usar Python 3.11
-FROM python:3.11-slim
+FROM python:3.11.8
 
 # Crear y usar directorio de la app
 WORKDIR /app
