@@ -7,7 +7,8 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from datetime import datetime
-
+import os
+import JSONResponse
 
 # Módulos locales
 import models, schemas, crud
@@ -235,6 +236,126 @@ def procesar_fallback(mensaje: str, user, db: Session):
     except Exception as e:
         db.rollback()
         return {'exito': False, 'respuesta_chatbot': f"Error: {str(e)[:50]}"}
+    
+# ========== ENDPOINTS DE DEBUG BD ==========
+@app.get("/debug/database", tags=["Debug"])
+def debug_database():
+    """Información detallada de la conexión a BD"""
+    try:
+        from database import get_db_info, test_connection
+        
+        # Probar conexión
+        connection_ok = test_connection()
+        
+        # Obtener info
+        db_info = get_db_info()
+        
+        # Variables de entorno (sin mostrar credenciales completas)
+        database_url = os.getenv("DATABASE_URL", "No configurada")
+        url_preview = database_url[:30] + "..." if len(database_url) > 30 else database_url
+        
+        return {
+            "connection_status": "✅ Conectado" if connection_ok else "❌ Error",
+            "database_info": db_info,
+            "environment": {
+                "DATABASE_URL_configured": database_url != "No configurada",
+                "DATABASE_URL_preview": url_preview,
+                "render_external_hostname": os.getenv("RENDER_EXTERNAL_HOSTNAME", "No configurado"),
+                "render_service_name": os.getenv("RENDER_SERVICE_NAME", "No configurado")
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error en debug database: {e}")
+        return {
+            "connection_status": "❌ Error crítico",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/debug/test-insert", tags=["Debug"])
+def debug_test_insert(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(require_role(["administrador"]))
+):
+    """Prueba insertar un movimiento de prueba para verificar BD"""
+    try:
+        # Verificar que exista al menos un producto
+        producto = db.query(models.Producto).first()
+        if not producto:
+            return {
+                "error": "No hay productos en la BD para hacer la prueba",
+                "suggestion": "Crea al menos un producto primero"
+            }
+        
+        # Crear movimiento de prueba
+        test_movimiento = models.MovimientoInventario(
+            tipo=models.TipoMovimientoEnum.entrada,
+            id_producto=producto.id_producto,
+            cantidad=1,
+            id_usuario=current_user.id_usuario,
+            descripcion="🧪 Prueba de conexión BD desde API",
+            fecha_movimiento=datetime.now()
+        )
+        
+        db.add(test_movimiento)
+        db.commit()
+        db.refresh(test_movimiento)
+        
+        # Actualizar stock
+        producto.stock_actual += 1
+        db.commit()
+        
+        return {
+            "success": "✅ Inserción exitosa",
+            "movimiento_id": test_movimiento.id_movimiento,
+            "producto_actualizado": {
+                "id": producto.id_producto,
+                "nombre": producto.nombre,
+                "stock_actual": producto.stock_actual
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error en test insert: {e}")
+        return {
+            "error": f"❌ Fallo inserción: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+@app.get("/debug/productos-count", tags=["Debug"])
+def debug_productos_count(db: Session = Depends(get_db)):
+    """Cuenta productos en la BD para verificar datos"""
+    try:
+        total_productos = db.query(models.Producto).count()
+        productos_con_stock = db.query(models.Producto).filter(models.Producto.stock_actual > 0).count()
+        
+        # Obtener algunos productos de ejemplo
+        productos_ejemplo = db.query(models.Producto).limit(3).all()
+        ejemplo_lista = []
+        for p in productos_ejemplo:
+            ejemplo_lista.append({
+                "id": p.id_producto,
+                "nombre": p.nombre,
+                "marca": p.marca,
+                "stock": p.stock_actual
+            })
+        
+        return {
+            "total_productos": total_productos,
+            "productos_con_stock": productos_con_stock,
+            "productos_ejemplo": ejemplo_lista,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en productos count: {e}")
+        return {
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 # ========== PRODUCTOS ==========
 @app.get("/productos/")
@@ -261,15 +382,57 @@ def listar_movimientos(
     return crud.get_movimientos(db, skip=0, limit=50)
 
 # ========== HEALTH ==========
-@app.get("/health")
-def health():
+@app.get("/health", tags=["Health"])
+def health_check():
+    """Health check mejorado con detalles de BD"""
     try:
-        db = SessionLocal()
-        db.execute(text("SELECT 1"))
-        db.close()
-        return {"status": "healthy", "database": "connected"}
+        from database import test_connection, get_db_info
+        
+        # Test conexión
+        db_connected = test_connection()
+        db_info = get_db_info() if db_connected else {"status": "disconnected"}
+        
+        # Test básico de query
+        try:
+            db = SessionLocal()
+            productos_count = db.query(models.Producto).count()
+            db.close()
+            query_test = "✅ OK"
+        except Exception as e:
+            productos_count = "error"
+            query_test = f"❌ {str(e)[:50]}"
+        
+        overall_status = "healthy" if db_connected and query_test.startswith("✅") else "degraded"
+        
+        return {
+            "status": overall_status,
+            "timestamp": datetime.now().isoformat(),
+            "version": "2.0.0",
+            "services": {
+                "database": {
+                    "connection": "✅ connected" if db_connected else "❌ disconnected",
+                    "info": db_info,
+                    "query_test": query_test,
+                    "productos_count": productos_count
+                },
+                "api": "✅ running"
+            },
+            "environment": {
+                "service": os.getenv("RENDER_SERVICE_NAME", "unknown"),
+                "region": os.getenv("RENDER_EXTERNAL_HOSTNAME", "unknown")
+            }
+        }
+        
     except Exception as e:
-        return {"status": "degraded", "database": "error", "error": str(e)}
+        logger.error(f"Health check failed: {e}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e)
+            }
+        )
 
 # ========== ADMIN DEMO ==========
 @app.post("/crear-admin-demo")
