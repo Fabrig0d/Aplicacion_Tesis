@@ -32,25 +32,23 @@ try:
             echo=False
         )
     else:
-        # Pool MUY restrictivo para no exceder límites de Clever Cloud
         engine = create_engine(
             DATABASE_URL,
-            pool_size=1,              # Solo 1 conexión permanente
-            max_overflow=2,           # Máximo 3 conexiones totales
-            pool_pre_ping=True,       # Verificar conexiones
-            pool_recycle=1800,        # Reciclar cada 30 minutos
-            pool_timeout=30,          # Timeout para obtener conexión
+            pool_size=1,          # 1 conexión fija
+            max_overflow=0,       # NO overflow; máximo 1 total
+            pool_pre_ping=True,
+            pool_recycle=900,     # 15 min
+            pool_timeout=20,      # espera menor
             connect_args={
                 "charset": "utf8mb4",
-                "connect_timeout": 10,
-                "read_timeout": 30,
-                "write_timeout": 30,
+                "connect_timeout": 8,
+                "read_timeout": 20,
+                "write_timeout": 20,
                 "autocommit": False,
             },
             echo=False
         )
-    
-    logger.info(f"✅ Engine creado - Pool size: 1, Max overflow: 2")
+        logger.info(f"✅ Engine creado - Pool size: 1, Max overflow: 0")
     
 except Exception as e:
     logger.error(f"❌ Error creando engine: {e}")
@@ -58,7 +56,7 @@ except Exception as e:
 
 # Crear sessionmaker con scoped_session para thread safety
 SessionLocal = scoped_session(
-    sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 )
 
 # Base para modelos
@@ -67,7 +65,6 @@ Base = declarative_base()
 # Context manager para sesiones seguras
 @contextmanager
 def get_db_session():
-    """Context manager para manejo seguro de sesiones"""
     session = SessionLocal()
     try:
         yield session
@@ -77,8 +74,10 @@ def get_db_session():
         logger.error(f"❌ Error in database session: {e}")
         raise
     finally:
-        session.close()
-        SessionLocal.remove()  # Limpia el scoped session
+        try:
+            session.close()
+        finally:
+            SessionLocal.remove()  # fuerza liberar el thread-local
 
 # Funciones helper
 def test_connection():
