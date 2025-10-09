@@ -1,12 +1,12 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import func
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from fastapi.responses import JSONResponse
 
@@ -380,6 +380,152 @@ def listar_movimientos(
     current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
 ):
     return crud.get_movimientos(db, skip=0, limit=50)
+
+# ========== DASHBOARD DATA ==========
+@app.get("/dashboard/stats", tags=["Dashboard"])
+def dashboard_stats(
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
+):
+    """Estadísticas reales del dashboard"""
+    try:
+        # Total productos
+        total_productos = db.query(models.Producto).count()
+        
+        # Productos con stock bajo (menor o igual al mínimo)
+        productos_stock_bajo = db.query(models.Producto).filter(
+            models.Producto.stock_actual <= models.Producto.stock_minimo
+        ).count()
+        
+        # Total stock (suma de todos los productos)
+        total_stock = db.query(func.sum(models.Producto.stock_actual)).scalar() or 0
+        
+        # Movimientos recientes (últimos 7 días)
+        desde_fecha = datetime.now() - timedelta(days=7)
+        movimientos_recientes = db.query(models.MovimientoInventario).filter(
+            models.MovimientoInventario.fecha_movimiento >= desde_fecha
+        ).count()
+        
+        # Productos más activos (con más movimientos)
+        productos_activos = db.query(
+            models.Producto.nombre,
+            models.Producto.marca,
+            func.count(models.MovimientoInventario.id_movimiento).label("movimientos")
+        ).join(models.MovimientoInventario).group_by(
+            models.Producto.id_producto
+        ).order_by(func.count(models.MovimientoInventario.id_movimiento).desc()).limit(5).all()
+        
+        # Formatear productos activos
+        productos_activos_list = [
+            {
+                "nombre": f"{p.nombre} {p.marca or ''}".strip(),
+                "movimientos": p.movimientos
+            } for p in productos_activos
+        ]
+        
+        return {
+            "total_productos": total_productos,
+            "productos_stock_bajo": productos_stock_bajo,
+            "total_stock": total_stock,
+            "movimientos_recientes": movimientos_recientes,
+            "productos_activos": productos_activos_list,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error dashboard stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/dashboard/movimientos-recientes", tags=["Dashboard"])
+def movimientos_recientes(
+    limit: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
+):
+    """Movimientos recientes con detalles de producto y usuario"""
+    try:
+        movimientos = db.query(models.MovimientoInventario).join(
+            models.Producto
+        ).join(models.Usuario).order_by(
+            models.MovimientoInventario.fecha_movimiento.desc()
+        ).limit(limit).all()
+        
+        result = []
+        for m in movimientos:
+            result.append({
+                "id": m.id_movimiento,
+                "tipo": m.tipo_movimiento.value if hasattr(m.tipo_movimiento, 'value') else str(m.tipo_movimiento),
+                "producto": f"{m.producto.nombre} {m.producto.marca or ''}".strip(),
+                "cantidad": m.cantidad,
+                "usuario": f"{m.usuario.nombre} {m.usuario.apellido}",
+                "fecha": m.fecha_movimiento.isoformat(),
+                "descripcion": m.descripcion or ""
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error movimientos recientes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+# ========== PRODUCTOS CON BÚSQUEDA ==========
+@app.get("/productos/search", tags=["Productos"])
+def buscar_productos(
+    q: str = Query("", min_length=0, max_length=100, description="Término de búsqueda"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
+):
+    """Búsqueda de productos con paginación"""
+    try:
+        query = db.query(models.Producto)
+        
+        # Aplicar filtro de búsqueda si se proporciona
+        if q.strip():
+            search_term = f"%{q.strip()}%"
+            query = query.filter(
+                models.Producto.nombre.ilike(search_term) |
+                models.Producto.marca.ilike(search_term) |
+                models.Producto.modelo.ilike(search_term) |
+                models.Producto.descripcion.ilike(search_term)
+            )
+        
+        # Total de resultados (para paginación)
+        total = query.count()
+        
+        # Aplicar paginación
+        productos = query.offset(offset).limit(limit).all()
+        
+        # Formatear respuesta
+        result = []
+        for p in productos:
+            estado_stock = "bajo" if p.stock_actual <= p.stock_minimo else "normal"
+            result.append({
+                "id": p.id_producto,
+                "nombre": p.nombre,
+                "marca": p.marca or "",
+                "modelo": p.modelo or "",
+                "descripcion": p.descripcion or "",
+                "stock_actual": p.stock_actual,
+                "stock_minimo": p.stock_minimo,
+                "estado_stock": estado_stock,
+                "precio": float(p.precio) if p.precio else 0.0,
+                "categoria": p.categoria.nombre if hasattr(p, 'categoria') and p.categoria else "",
+                "fecha_actualizacion": p.fecha_actualizacion.isoformat() if hasattr(p, 'fecha_actualizacion') and p.fecha_actualizacion else None
+            })
+        
+        return {
+            "productos": result,
+            "total": total,
+            "page": offset // limit,
+            "per_page": limit,
+            "query": q
+        }
+        
+    except Exception as e:
+        logger.error(f"Error búsqueda productos: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ========== HEALTH ==========
 @app.get("/health", tags=["Health"])
