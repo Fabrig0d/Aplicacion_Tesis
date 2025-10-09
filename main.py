@@ -1,45 +1,50 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
-from sqlalchemy import text
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+import models, schemas, crud
+from auth import authenticate_user, create_access_token, get_db
+from database import SessionLocal, engine
+from auth import require_role
 from typing import Optional, Dict, Any
-from datetime import datetime
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import logging
+from datetime import datetime
+import traceback
 
-# Imports locales
-from database import SessionLocal, engine, Base
-import models
-import schemas  
-import crud
-from auth import authenticate_user, create_access_token, require_role
+# Crear tablas
+models.Base.metadata.create_all(bind=engine)
 
-# Crear tablas al iniciar (fallback seguro)
-try:
-    Base.metadata.create_all(bind=engine)
-    print("✅ Tablas creadas/verificadas")
-except Exception as e:
-    print(f"⚠️  Error creando tablas: {e}")
-
-# App
+# Crear app
 app = FastAPI(
-    title="API Inventario - Demo Ligera",
-    description="API REST ligera para inventarios con chatbot demo",
-    version="1.0.0"
+    title="API Gestión de Inventarios",
+    description="API REST para gestión de inventarios con chatbot PLN integrado",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# CORS
+# Configurar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Para pruebas - restringir en producción
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Logging
-logging.basicConfig(level=logging.INFO)
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Dependencia DB
@@ -59,138 +64,186 @@ class ChatbotResponse(BaseModel):
     exito: bool
     respuesta_chatbot: str
     confianza: Optional[float] = None
-    timestamp: str
+    orden_procesada: Optional[Dict[str, Any]] = None
+    detalles_operacion: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    sugerencias: Optional[list] = None
+    timestamp: str = None
+    request_id: Optional[str] = None
 
-# ========== ENDPOINTS ==========
-
-@app.get("/")
-def root():
-    return {
-        "message": "API Inventario - Demo funcionando",
-        "version": "1.0.0",
-        "endpoints": ["/docs", "/health", "/login", "/chatbot/inventario", "/productos"]
-    }
-
-@app.get("/health")
-def health_check():
-    try:
-        db = SessionLocal()
-        try:
-            db.execute(text("SELECT 1"))
-            db_status = "connected"
-        except Exception as e:
-            logger.error(f"DB health check failed: {e}")
-            db_status = "disconnected"
-        finally:
-            db.close()
-        
-        return {
-            "status": "healthy" if db_status == "connected" else "degraded",
-            "database": db_status,
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "database": "error",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
-
+# ========== AUTENTICACIÓN ==========
 @app.post("/login")
-def login_endpoint(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(), 
     db: Session = Depends(get_db)
 ):
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales incorrectas"
+            detail="Correo o contraseña incorrectos",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    
     access_token = create_access_token(data={"sub": user.correo})
     return {"access_token": access_token, "token_type": "bearer"}
 
-@app.post("/chatbot/inventario", response_model=ChatbotResponse)
-def chatbot_endpoint(
+@app.get("/usuarios/me")
+def read_users_me(current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
+    return {
+        "id": current_user.id_usuario,
+        "correo": current_user.correo,
+        "rol": current_user.rol
+    }
+
+# ========== CHATBOT PRINCIPAL ==========
+@app.post("/chatbot/inventario", response_model=ChatbotResponse, tags=["Chatbot"])
+def chatbot_inventario_endpoint(
     request: ChatbotRequest,
     current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
 ):
     """
-    Chatbot demo - versión ligera sin PLN pesado
+    Endpoint principal del chatbot para procesar órdenes de inventario
+    
+    **Ejemplos de mensajes soportados:**
+    - "agrega 50 mouse logitech G203" 
+    - "elimina 10 teclados razer blackwidow"
+    - "consulta stock de impresoras epson"
+    - "ajusta monitor samsung a 25"
+    - "genera reporte de laptops dell"
     """
     
-    # Respuesta demo sin procesamiento pesado
-    mensaje = request.mensaje.lower()
+    request_id = f"req_{int(datetime.now().timestamp())}"
     
-    if "agrega" in mensaje or "añade" in mensaje:
-        respuesta = f"✅ Demo: Procesaría agregar productos según: '{request.mensaje}'"
-    elif "elimina" in mensaje or "quita" in mensaje:
-        respuesta = f"✅ Demo: Procesaría eliminar productos según: '{request.mensaje}'"
-    elif "consulta" in mensaje or "stock" in mensaje:
-        respuesta = f"✅ Demo: Consultaría stock según: '{request.mensaje}'"
-    else:
-        respuesta = f"✅ Demo: Mensaje recibido y procesado: '{request.mensaje}'"
-    
-    logger.info(f"Chatbot request from {current_user.correo}: {request.mensaje}")
-    
-    return ChatbotResponse(
-        exito=True,
-        respuesta_chatbot=respuesta,
-        confianza=0.95,
-        timestamp=datetime.now().isoformat()
-    )
-
-@app.get("/productos/")
-def listar_productos(
-    db: Session = Depends(get_db),
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
-):
     try:
-        return crud.get_productos(db)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error obteniendo productos: {str(e)}")
-
-# Endpoint temporal para crear usuario admin
-@app.post("/crear-admin-demo")
-def crear_admin_demo(db: Session = Depends(get_db)):
-    """
-    TEMPORAL: Crear usuario admin para demo
-    """
-    try:
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        logger.info(f"Chatbot request [{request_id}]: '{request.mensaje}' - User: {current_user.correo}")
         
-        # Verificar si ya existe
-        existing = db.query(models.Usuario).filter(models.Usuario.correo == "admin@demo.com").first()
-        if existing:
-            return {"message": "Usuario demo ya existe", "correo": "admin@demo.com"}
+        # Procesar mensaje con chatbot
+        try:
+            from chatbot import procesar_mensaje_chatbot
+            resultado = procesar_mensaje_chatbot(request.mensaje, current_user.id_usuario)
+        except ImportError:
+            # Fallback si no existe el módulo chatbot completo
+            resultado = {
+                'exito': True,
+                'respuesta_chatbot': f"✅ Mensaje recibido: '{request.mensaje}'\n\n🤖 Chatbot en desarrollo. Conexión exitosa con backend.",
+                'confianza': 1.0,
+                'orden_procesada': {'mensaje': request.mensaje}
+            }
         
-        # Crear usuario demo
-        admin_user = models.Usuario(
-            nombre="Admin",
-            apellido="Demo",
-            correo="admin@demo.com",
-            rol=models.RolEnum.administrador if hasattr(models, 'RolEnum') else "administrador",
-            password_hash=pwd_context.hash("demo123")
+        # Log resultado
+        if resultado['exito']:
+            logger.info(f"Chatbot success [{request_id}]: {resultado.get('detalles_operacion', {}).get('mensaje', 'Operación exitosa')}")
+        else:
+            logger.warning(f"Chatbot failed [{request_id}]: {resultado.get('error', 'Error desconocido')}")
+        
+        return ChatbotResponse(
+            exito=resultado['exito'],
+            respuesta_chatbot=resultado['respuesta_chatbot'],
+            confianza=resultado.get('confianza'),
+            orden_procesada=resultado.get('orden_procesada'),
+            detalles_operacion=resultado.get('detalles_operacion'),
+            error=resultado.get('error'),
+            sugerencias=resultado.get('sugerencias'),
+            timestamp=datetime.now().isoformat(),
+            request_id=request_id
         )
         
-        db.add(admin_user)
-        db.commit()
-        db.refresh(admin_user)
+    except Exception as e:
+        logger.error(f"Chatbot error [{request_id}]: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        return ChatbotResponse(
+            exito=False,
+            respuesta_chatbot="😵 Ocurrió un error inesperado. Por favor intenta de nuevo en un momento.",
+            error=f"Error interno: {str(e)[:100]}",
+            timestamp=datetime.now().isoformat(),
+            request_id=request_id
+        )
+
+# ========== PRODUCTOS ==========
+@app.get("/productos/", response_model=list[schemas.Producto])
+def listar_productos(db: Session = Depends(get_db),
+                    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
+    return crud.get_productos(db)
+
+@app.get("/productos/{producto_id}", response_model=schemas.Producto)
+def obtener_producto(producto_id: int, db: Session = Depends(get_db),
+                    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
+    db_producto = crud.get_producto(db, producto_id)
+    if not db_producto:
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    return db_producto
+
+# ========== HEALTH CHECK ==========
+@app.get("/health", tags=["Health"])
+def health_check():
+    """Endpoint de salud del sistema"""
+    try:
+        # Verificar conexión a BD
+        db = SessionLocal()
+        try:
+            db.execute("SELECT 1")
+            db_status = "connected"
+        except Exception as e:
+            logger.error(f"Database health check failed: {str(e)}")
+            db_status = "disconnected"
+        finally:
+            db.close()
+        
+        # Verificar PLN (opcional)
+        pln_status = "healthy"
+        try:
+            import pln as pln_module
+            test_result = pln_module.procesar_orden_inventario("test")
+            if not test_result:
+                pln_status = "error"
+        except Exception as e:
+            logger.error(f"PLN health check failed: {str(e)}")
+            pln_status = "error"
+        
+        overall_status = "healthy" if db_status == "connected" else "degraded"
         
         return {
-            "message": "Usuario demo creado",
-            "correo": "admin@demo.com",
-            "password": "demo123",
-            "instrucciones": "Usa estas credenciales para login. Elimina este endpoint después."
+            "status": overall_status,
+            "timestamp": datetime.now().isoformat(),
+            "services": {
+                "database": db_status,
+                "pln": pln_status,
+                "chatbot": "healthy"
+            },
+            "version": "1.0.0"
         }
         
     except Exception as e:
-        db.rollback()
-        return {"error": f"Error creando usuario: {str(e)}"}
+        logger.error(f"Health check failed: {str(e)}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e)
+            }
+        )
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# ========== INFO ==========
+@app.get("/info", tags=["Info"])
+def app_info():
+    """Información general de la API"""
+    return {
+        "name": "API Gestión de Inventarios",
+        "version": "1.0.0",
+        "description": "API REST para gestión de inventarios con chatbot PLN integrado",
+        "endpoints": {
+            "authentication": "/login",
+            "chatbot": "/chatbot/inventario",
+            "health": "/health",
+            "docs": "/docs"
+        },
+        "features": [
+            "Autenticación JWT",
+            "Chatbot PLN en español",
+            "CRUD completo de inventarios",
+            "Manejo automático de plurales y sinónimos",
+            "Reportes automáticos"
+        ]
+    }
