@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -11,7 +11,7 @@ import os
 from fastapi.responses import JSONResponse
 import models, schemas, crud
 from auth import authenticate_user, create_access_token, require_role
-from database import SessionLocal, engine, Base, get_db_session, get_db
+from database import engine, get_db_session
 
 # App
 app = FastAPI(title="API Inventario PLN", version="2.0.0")
@@ -48,14 +48,22 @@ def root():
 # ========== LOGIN ==========
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    """Login usando context manager para sesión única"""
-    with get_db_session() as db:
-        user = authenticate_user(db, form_data.username, form_data.password)
-        if not user:
-            raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-        
-        token = create_access_token(data={"sub": user.correo})
-        return {"access_token": token, "token_type": "bearer"}
+    try:
+        with get_db_session() as db:
+            user = authenticate_user(db, form_data.username, form_data.password)
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Credenciales incorrectas",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            token = create_access_token(data={"sub": user.correo})
+            return {"access_token": token, "token_type": "bearer"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Nunca devolver 500 silencioso; mejor 400 con detalle acotado
+        raise HTTPException(status_code=400, detail=f"Error en login")
 
 # ========== USUARIOS ==========
 @app.get("/usuarios/me")
