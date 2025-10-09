@@ -46,10 +46,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 # ================== CURRENT USER ==================
 async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """
-    Obtiene el usuario actual a partir del token.
-    Usa una sesión de BD por contexto y la cierra correctamente.
-    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Token inválido o expirado",
@@ -63,21 +59,26 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise credentials_exception
 
-    # Consulta del usuario con context manager para NO dejar sesiones abiertas
+    # Cargar y aplanar ANTES de cerrar la sesión
     with get_db_session() as db:
         user = db.query(models.Usuario).filter(models.Usuario.correo == correo).first()
         if user is None:
             raise credentials_exception
-        return user
+
+        # Campos primitivos; evita lazy loads tras cerrar sesión
+        current_user = {
+            "id_usuario": user.id_usuario,
+            "correo": user.correo,
+            "nombre": user.nombre,
+            "apellido": user.apellido,
+            "rol": getattr(user.rol, "value", str(user.rol)),  # Enum -> str
+            "telefono": getattr(user, 'telefono', None),
+            "fecha_registro": getattr(user, 'fecha_registro', None),
+        }
+        return current_user
 
 # ================== ROLE CHECKER ==================
 def require_role(required_roles: List[str]):
-    """
-    Verifica que el usuario actual tenga alguno de los roles requeridos.
-    - Soporta roles como Enum o string.
-    - Normaliza a minúsculas.
-    - Soporta alias: 'usuario' ≈ 'operador', 'admin' ≈ 'administrador'
-    """
     alias_map = {
         "admin": "administrador",
         "administrador": "administrador",
@@ -85,33 +86,25 @@ def require_role(required_roles: List[str]):
         "operador": "operador",
         "auditor": "auditor",
     }
-
-    normalized_required = set(
+    normalized_required = {
         alias_map.get(str(r).lower().strip(), str(r).lower().strip())
         for r in required_roles
-    )
+    }
 
     def to_role_str(role_obj) -> str:
-        """
-        Acepta Enum ('RolEnum.administrador'), strings y otros tipos.
-        Si es Enum usa .value, de lo contrario str(role_obj).
-        """
         try:
             value = getattr(role_obj, "value", role_obj)
             return str(value).lower().strip()
         except Exception:
             return str(role_obj).lower().strip()
 
-    def role_checker(current_user: models.Usuario = Depends(get_current_user)):
-        raw_role = current_user.rol
+    def role_checker(current_user = Depends(get_current_user)):
+        # current_user puede ser dict o modelo
+        raw_role = current_user.get("rol") if isinstance(current_user, dict) else getattr(current_user, "rol", "")
         user_role_str = to_role_str(raw_role)
         normalized_user_role = alias_map.get(user_role_str, user_role_str)
-
         if normalized_user_role not in normalized_required:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No tienes permisos para esta acción"
-            )
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permisos")
         return current_user
 
     return role_checker

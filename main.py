@@ -67,8 +67,19 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 # ========== USUARIOS ==========
 @app.get("/usuarios/me")
-def read_users_me(current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))):
-    """No necesita DB adicional ya que current_user viene de auth"""
+def read_users_me(current_user = Depends(require_role(["administrador", "operador"]))):
+    if isinstance(current_user, dict):
+        return {
+            "id": current_user["id_usuario"],
+            "correo": current_user["correo"],
+            "nombre": current_user["nombre"],
+            "apellido": current_user["apellido"],
+            "rol": current_user["rol"],
+            "telefono": current_user.get("telefono"),
+            "fecha_registro": current_user["fecha_registro"].isoformat()
+                if current_user.get("fecha_registro") else None,
+        }
+    # Solo si en algún caso llegase como modelo
     return {
         "id": current_user.id_usuario,
         "correo": current_user.correo,
@@ -76,7 +87,8 @@ def read_users_me(current_user: models.Usuario = Depends(require_role(["administ
         "apellido": current_user.apellido,
         "rol": getattr(current_user.rol, "value", str(current_user.rol)),
         "telefono": getattr(current_user, 'telefono', None),
-        "fecha_registro": getattr(current_user, 'fecha_registro', datetime.now()).isoformat() if hasattr(current_user, 'fecha_registro') else None,
+        "fecha_registro": getattr(current_user, 'fecha_registro', None).isoformat()
+            if getattr(current_user, 'fecha_registro', None) else None,
     }
 
 # ========== CHATBOT PRINCIPAL ==========
