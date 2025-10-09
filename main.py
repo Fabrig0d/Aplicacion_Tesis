@@ -2,12 +2,12 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-import models, schemas, crud
-from database import SessionLocal, engine
+import crud
+from database import SessionLocal
 from auth import authenticate_user, create_access_token, require_role
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional
 from datetime import datetime
 
 app = FastAPI(title="API Inventario (Demo Ligera)")
