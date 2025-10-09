@@ -579,7 +579,20 @@ def health_check():
                 "error": str(e)
             }
         )
-
+    
+@app.get("/usuarios/me")
+def read_users_me(
+    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
+):
+    return {
+        "id": current_user.id_usuario,
+        "correo": current_user.correo,
+        "nombre": current_user.nombre,
+        "apellido": current_user.apellido,
+        "rol": getattr(current_user.rol, "value", str(current_user.rol)),
+        "telefono": getattr(current_user, 'telefono', None),
+        "fecha_registro": getattr(current_user, 'fecha_registro', datetime.now()).isoformat() if hasattr(current_user, 'fecha_registro') else None,
+    }
 # ========== ADMIN DEMO ==========
 @app.post("/crear-admin-demo")
 def crear_admin(db: Session = Depends(get_db)):
