@@ -276,7 +276,7 @@ def dashboard_stats(current_user: models.Usuario = Depends(require_role(["admini
         productos_activos = db.query(
             models.Producto.id_producto,
             models.Producto.nombre.label("producto_nombre"),
-            models.Marca.nombre.label("marca_nombre"),
+            models.Marca.marca_nombre.label("marca_nombre"),
             func.count(models.MovimientoInventario.id_movimiento).label("movimientos")
         ).join(
             models.MovimientoInventario, models.MovimientoInventario.id_producto == models.Producto.id_producto
