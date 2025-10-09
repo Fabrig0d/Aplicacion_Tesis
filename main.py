@@ -95,18 +95,18 @@ def read_users_me(current_user = Depends(require_role(["administrador", "operado
 @app.post("/chatbot/inventario", response_model=ChatbotResponse)
 def chatbot_endpoint(
     request: ChatbotRequest,
-    current_user: models.Usuario = Depends(require_role(["administrador", "operador"]))
+    current_user = Depends(require_role(["administrador", "operador"]))
 ):
-    """Chatbot con sesión única y context manager"""
     try:
         with get_db_session() as db:
-            # Intentar PLN completo
+            usuario_id = current_user["id_usuario"] if isinstance(current_user, dict) else current_user.id_usuario
+
+            # PLN o fallback
             try:
                 from pln_hf import procesar_mensaje_chatbot
-                resultado = procesar_mensaje_chatbot(request.mensaje, current_user.id_usuario, db)
+                resultado = procesar_mensaje_chatbot(request.mensaje, usuario_id, db)
             except ImportError:
-                # Fallback sin PLN
-                resultado = procesar_fallback(request.mensaje, current_user, db)
+                resultado = procesar_fallback(request.mensaje, current_user, db)  # ajusta fallback también
 
             return ChatbotResponse(
                 exito=resultado.get('exito', False),
@@ -125,7 +125,7 @@ def chatbot_endpoint(
         )
 
 def procesar_fallback(mensaje: str, user, db: Session):
-    """Fallback que ya recibe la sesión como parámetro"""
+    usuario_id = user["id_usuario"] if isinstance(user, dict) else getattr(user, "id_usuario", None)
     msg = mensaje.lower()
 
     # Detectar intención
@@ -169,7 +169,7 @@ def procesar_fallback(mensaje: str, user, db: Session):
             tipo_movimiento=models.TipoMovimientoEnum.entrada,
             id_producto=prod_bd.id_producto,
             cantidad=cantidad,
-            id_usuario=user.id_usuario,
+            id_usuario=usuario_id,
             fecha_movimiento=datetime.now(),
             observaciones=f"Entrada vía chatbot: {mensaje}"
         )
@@ -276,7 +276,7 @@ def dashboard_stats(current_user: models.Usuario = Depends(require_role(["admini
         productos_activos = db.query(
             models.Producto.id_producto,
             models.Producto.nombre.label("producto_nombre"),
-            models.Marca.marca_nombre.label("marca_nombre"),
+            models.Marca.nombre_marca.label("nombre_marca"),
             func.count(models.MovimientoInventario.id_movimiento).label("movimientos")
         ).join(
             models.MovimientoInventario, models.MovimientoInventario.id_producto == models.Producto.id_producto
@@ -285,14 +285,14 @@ def dashboard_stats(current_user: models.Usuario = Depends(require_role(["admini
         ).group_by(
             models.Producto.id_producto,
             models.Producto.nombre,
-            models.Marca.nombre
+            models.Marca.nombre_marca
         ).order_by(
             func.count(models.MovimientoInventario.id_movimiento).desc()
         ).limit(5).all()
 
         productos_activos_list = [
             {
-                "nombre": f"{row.producto_nombre} {row.marca_nombre or ''}".strip(),
+                "nombre": f"{row.producto_nombre} {row.nombre_marca or ''}".strip(),
                 "movimientos": row.movimientos
             }
             for row in productos_activos
