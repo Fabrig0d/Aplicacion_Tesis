@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 from datetime import datetime
 import os
-import JSONResponse
+from fastapi.responses import JSONResponse
 
 # Módulos locales
 import models, schemas, crud
