@@ -99,14 +99,16 @@ def chatbot_endpoint(
 ):
     try:
         with get_db_session() as db:
+            # current_user viene como dict por la optimización de sesiones
             usuario_id = current_user["id_usuario"] if isinstance(current_user, dict) else current_user.id_usuario
 
-            # PLN o fallback
+            # Intentar PLN externo si existe
             try:
                 from pln_hf import procesar_mensaje_chatbot
                 resultado = procesar_mensaje_chatbot(request.mensaje, usuario_id, db)
             except ImportError:
-                resultado = procesar_fallback(request.mensaje, current_user, db)  # ajusta fallback también
+                # Fallback sin PLN
+                resultado = procesar_fallback(request.mensaje, usuario_id, db)
 
             return ChatbotResponse(
                 exito=resultado.get('exito', False),
@@ -117,23 +119,27 @@ def chatbot_endpoint(
             )
 
     except Exception as e:
-        logger.error(f"Error chatbot: {e}")
+        logger.error(f"Error chatbot: {e}", exc_info=True)
         return ChatbotResponse(
             exito=False,
             respuesta_chatbot="Error procesando solicitud",
             timestamp=datetime.now().isoformat()
         )
 
-def procesar_fallback(mensaje: str, user, db: Session):
-    usuario_id = user["id_usuario"] if isinstance(user, dict) else getattr(user, "id_usuario", None)
+
+def procesar_fallback(mensaje: str, usuario_id: int, db: Session):
+    """
+    Procesamiento básico sin PLN pero con BD real.
+    Usa usuario_id (int) para evitar depender del objeto usuario.
+    """
     msg = mensaje.lower()
 
     # Detectar intención
-    if any(w in msg for w in ["agrega", "añade"]):
+    if any(w in msg for w in ["agrega", "añade", "ingresa", "sumar", "entrada"]):
         tipo = "entrada"
-    elif any(w in msg for w in ["elimina", "quita", "saca"]):
+    elif any(w in msg for w in ["elimina", "quita", "saca", "retira", "remueve", "descuenta", "salida"]):
         tipo = "salida"
-    elif any(w in msg for w in ["consulta", "stock", "cuanto"]):
+    elif any(w in msg for w in ["consulta", "stock", "cuanto", "disponible", "hay"]):
         tipo = "consulta"
     else:
         return {
@@ -146,114 +152,102 @@ def procesar_fallback(mensaje: str, user, db: Session):
     nums = re.findall(r'\d+', mensaje)
     cantidad = int(nums[0]) if nums else 1
 
-    # Detectar producto básico
-    productos = ["mouse", "teclado", "monitor", "impresora"]
+    # Detectar producto básico (palabra genérica dentro del texto)
+    productos = ["mouse", "teclado", "monitor", "impresora", "laptop", "ssd", "hdd"]
     producto = None
     for p in productos:
         if p in msg:
             producto = p
             break
 
-    if tipo == "entrada" and producto:
-        prod_bd = db.query(models.Producto).filter(
-            models.Producto.nombre.ilike(f"%{producto}%")
-        ).first()
-
-        if not prod_bd:
-            return {
-                'exito': False,
-                'respuesta_chatbot': f"Producto {producto} no encontrado"
-            }
-
-        mov = models.MovimientoInventario(
-            tipo_movimiento=models.TipoMovimientoEnum.entrada,
-            id_producto=prod_bd.id_producto,
-            cantidad=cantidad,
-            id_usuario=usuario_id,
-            fecha_movimiento=datetime.now(),
-            observaciones=f"Entrada vía chatbot: {mensaje}"
-        )
-        db.add(mov)
-        prod_bd.stock_actual += cantidad
-        # No hacemos commit aquí, el context manager se encarga
-
-        return {
-            'exito': True,
-            'respuesta_chatbot': f"✅ Agregados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
-            'confianza': 0.8,
-            'orden_procesada': {'tipo': 'entrada', 'producto': prod_bd.nombre, 'cantidad': cantidad}
-        }
-
-    elif tipo == "salida" and producto:
-        prod_bd = db.query(models.Producto).filter(
-            models.Producto.nombre.ilike(f"%{producto}%")
-        ).first()
-
-        if not prod_bd:
-            return {
-                'exito': False,
-                'respuesta_chatbot': f"Producto {producto} no encontrado"
-            }
-
-        if prod_bd.stock_actual < cantidad:
-            return {
-                'exito': False,
-                'respuesta_chatbot': f"Stock insuficiente. Disponible: {prod_bd.stock_actual}"
-            }
-
-        mov = models.MovimientoInventario(
-            tipo_movimiento=models.TipoMovimientoEnum.salida,
-            id_producto=prod_bd.id_producto,
-            cantidad=cantidad,
-            id_usuario=user.id_usuario,
-            fecha_movimiento=datetime.now()
-        )
-        db.add(mov)
-        prod_bd.stock_actual -= cantidad
-
-        return {
-            'exito': True,
-            'respuesta_chatbot': f"✅ Retirados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
-            'confianza': 0.8,
-            'orden_procesada': {'tipo': 'salida', 'producto': prod_bd.nombre, 'cantidad': cantidad}
-        }
-
-    elif tipo == "consulta":
-        if producto:
+    try:
+        if tipo in ["entrada", "salida"] and producto:
+            # Buscar producto en BD (contiene la palabra)
             prod_bd = db.query(models.Producto).filter(
                 models.Producto.nombre.ilike(f"%{producto}%")
             ).first()
 
-            if prod_bd:
-                return {
-                    'exito': True,
-                    'respuesta_chatbot': f"📊 {prod_bd.nombre}: {prod_bd.stock_actual} unidades",
-                    'confianza': 0.9
-                }
-            else:
+            if not prod_bd:
                 return {
                     'exito': False,
                     'respuesta_chatbot': f"Producto {producto} no encontrado"
                 }
-        else:
-            productos = db.query(models.Producto).limit(5).all()
-            if productos:
-                lista = [f"• {p.nombre}: {p.stock_actual}" for p in productos]
+
+            if tipo == "entrada":
+                mov = models.MovimientoInventario(
+                    tipo_movimiento=models.TipoMovimientoEnum.entrada,
+                    id_producto=prod_bd.id_producto,
+                    cantidad=cantidad,
+                    id_usuario=usuario_id,
+                    fecha_movimiento=datetime.now(),
+                    observaciones=f"Entrada vía chatbot: {mensaje}"
+                )
+                db.add(mov)
+                prod_bd.stock_actual += cantidad
+
                 return {
                     'exito': True,
-                    'respuesta_chatbot': "📊 Stock:\n" + "\n".join(lista),
-                    'confianza': 0.9
-                }
-            else:
-                return {
-                    'exito': True,
-                    'respuesta_chatbot': "No hay productos registrados"
+                    'respuesta_chatbot': f"✅ Agregados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
+                    'confianza': 0.8,
+                    'orden_procesada': {'tipo': 'entrada', 'producto': prod_bd.nombre, 'cantidad': cantidad}
                 }
 
-    return {
-        'exito': False,
-        'respuesta_chatbot': "No pude procesar la solicitud"
-    }
+            else:  # salida
+                if prod_bd.stock_actual < cantidad:
+                    return {
+                        'exito': False,
+                        'respuesta_chatbot': f"Stock insuficiente. Disponible: {prod_bd.stock_actual}"
+                    }
+
+                mov = models.MovimientoInventario(
+                    tipo_movimiento=models.TipoMovimientoEnum.salida,
+                    id_producto=prod_bd.id_producto,
+                    cantidad=cantidad,
+                    id_usuario=usuario_id,
+                    fecha_movimiento=datetime.now(),
+                    observaciones=f"Salida vía chatbot: {mensaje}"
+                )
+                db.add(mov)
+                prod_bd.stock_actual -= cantidad
+
+                return {
+                    'exito': True,
+                    'respuesta_chatbot': f"✅ Retirados {cantidad} {prod_bd.nombre}. Stock: {prod_bd.stock_actual}",
+                    'confianza': 0.8,
+                    'orden_procesada': {'tipo': 'salida', 'producto': prod_bd.nombre, 'cantidad': cantidad}
+                }
+
+        elif tipo == "consulta":
+            if producto:
+                prod_bd = db.query(models.Producto).filter(
+                    models.Producto.nombre.ilike(f"%{producto}%")
+                ).first()
+
+                if prod_bd:
+                    return {
+                        'exito': True,
+                        'respuesta_chatbot': f"📊 {prod_bd.nombre}: {prod_bd.stock_actual} unidades",
+                        'confianza': 0.9
+                    }
+                else:
+                    return {'exito': False, 'respuesta_chatbot': f"Producto {producto} no encontrado"}
+            else:
+                productos_lista = db.query(models.Producto).limit(5).all()
+                if productos_lista:
+                    lista = [f"• {p.nombre}: {p.stock_actual}" for p in productos_lista]
+                    return {
+                        'exito': True,
+                        'respuesta_chatbot': "📊 Stock:\n" + "\n".join(lista),
+                        'confianza': 0.9
+                    }
+                else:
+                    return {'exito': True, 'respuesta_chatbot': "No hay productos registrados"}
+
+        return {'exito': False, 'respuesta_chatbot': "No pude procesar la solicitud"}
+
+    except Exception as e:
+        db.rollback()
+        return {'exito': False, 'respuesta_chatbot': f"Error: {str(e)[:80]}"}
 
 
 # ========== PRODUCTOS CON BÚSQUEDA ==========
