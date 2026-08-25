@@ -179,7 +179,6 @@ def create_usuario(db: Session, usuario: schemas.UsuarioCreate):
         nombre=usuario.nombre,
         apellido=usuario.apellido,
         rol=usuario.rol,
-        telefono=usuario.telefono,
         password_hash=password_hash # Ajusta al nombre exacto de la columna en tu modelo models.Usuario
     )
     
