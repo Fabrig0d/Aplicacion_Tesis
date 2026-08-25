@@ -61,6 +61,13 @@ class Usuario(UsuarioBase):
 
     class Config:
         from_attributes = True
+        
+class UsuarioResponse(UsuarioBase):
+    id_usuario: int
+    fecha_registro: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 # ---------- Producto ----------
