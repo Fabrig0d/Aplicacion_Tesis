@@ -377,7 +377,6 @@ def dashboard_summary(
 )
 def crear_usuario(
     usuario: schemas.UsuarioCreate,
-    current_user = Depends(require_role(["administrador"]))  # Solo admins pueden crear usuarios
 ):
     with get_db_session() as db:
         # 1. Verificar si el correo ya existe
