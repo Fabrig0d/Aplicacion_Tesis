@@ -1,6 +1,8 @@
+import schemas
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 import models
+from auth import get_password_hash
 from typing import List, Optional
 
 def buscar_o_crear_producto(db: Session, nombre: str, marca_nombre: str, modelo: str = None) -> models.Producto:
@@ -168,3 +170,23 @@ def crear_movimiento_inventario(db: Session, producto_id: int, usuario_id: int, 
     db.commit()
     db.refresh(movimiento)
     return movimiento
+
+def create_usuario(db: Session, usuario: schemas.UsuarioCreate):
+    password_hash = get_password_hash(usuario.password)
+    
+    db_usuario = models.Usuario(
+        correo=usuario.correo,
+        nombre=usuario.nombre,
+        apellido=usuario.apellido,
+        rol=usuario.rol,
+        telefono=usuario.telefono,
+        password_hash=password_hash # Ajusta al nombre exacto de la columna en tu modelo models.Usuario
+    )
+    
+    db.add(db_usuario)
+    db.commit()
+    db.refresh(db_usuario)
+    return db_usuario
+
+def get_usuario_by_correo(db: Session, correo: str):
+    return db.query(models.Usuario).filter(models.Usuario.correo == correo).first()

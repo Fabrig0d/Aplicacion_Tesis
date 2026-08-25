@@ -17,8 +17,7 @@ from database import get_db_session  # engine no se usa en producción aquí
 app = FastAPI(title="API Inventario PLN", version="2.0.0")
 
 # ========== CORS (producción) ==========
-# Configure orígenes permitidos por variables de entorno, separados por coma.
-# Ej: ALLOW_ORIGINS=https://app.tu-dominio.com,https://admin.tu-dominio.com
+
 ALLOW_ORIGINS = [o.strip() for o in os.getenv("ALLOW_ORIGINS", "").split(",") if o.strip()]
 ALLOW_CREDENTIALS = os.getenv("ALLOW_CREDENTIALS", "true").lower() == "true"
 
@@ -369,6 +368,29 @@ def dashboard_summary(
             "productos_activos": productos_activos,
             "movimientos": movimientos_list
         }
+
+@app.post(
+    "/usuarios/",
+    response_model=schemas.UsuarioResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Usuarios"]
+)
+def crear_usuario(
+    usuario: schemas.UsuarioCreate,
+    current_user = Depends(require_role(["administrador"]))  # Solo admins pueden crear usuarios
+):
+    with get_db_session() as db:
+        # 1. Verificar si el correo ya existe
+        usuario_existente = db.query(models.Usuario).filter(models.Usuario.correo == usuario.correo).first()
+        if usuario_existente:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El correo electrónico ya se encuentra registrado"
+            )
+        
+        # 2. Hashear y persistir el nuevo usuario
+        nuevo_usuario = crud.create_usuario(db, usuario)
+        return nuevo_usuario
 
 if __name__ == "__main__":
     import uvicorn
