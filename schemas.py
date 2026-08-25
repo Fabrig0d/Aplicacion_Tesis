@@ -52,6 +52,7 @@ class UsuarioBase(BaseModel):
     apellido: str
     correo: EmailStr
     rol: Optional[str] = "operador"
+    telefono: Optional[str] = None
 
 class UsuarioCreate(UsuarioBase):
     password: str
@@ -61,7 +62,7 @@ class Usuario(UsuarioBase):
 
     class Config:
         from_attributes = True
-        
+
 class UsuarioResponse(UsuarioBase):
     id_usuario: int
     fecha_registro: Optional[datetime] = None
